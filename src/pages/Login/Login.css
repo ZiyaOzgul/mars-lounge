@@ -24,9 +24,13 @@
 }
 
 .login-logo__icon {
-  font-size: 40px;
-  line-height: 1;
-  margin-bottom: 10px;
+  display: block;
+  width: 120px;
+  height: 120px;
+  margin: 0 auto 14px;
+  object-fit: cover;
+  border-radius: 16px;
+  box-shadow: var(--color-shadow);
 }
 
 .login-logo__name {

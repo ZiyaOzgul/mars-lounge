@@ -27,6 +27,13 @@ function legacyProductPath(filename) {
   return path.join(__dirname, '..', 'public', 'products', filename)
 }
 
+// Window/taskbar icon. public/ is not in the electron-builder `files`
+// allowlist — Vite copies it into dist/, which is what ships.
+function appIconPath() {
+  const dir = app.isPackaged ? 'dist' : 'public'
+  return path.join(__dirname, '..', dir, 'icon.ico')
+}
+
 function checkForUpdates() {
   if (!app.isPackaged) return
   autoUpdater.checkForUpdatesAndNotify().catch((err) => {
@@ -71,6 +78,7 @@ function createWindow() {
     minWidth: 1024,
     minHeight: 600,
     show: false,
+    icon: appIconPath(),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,

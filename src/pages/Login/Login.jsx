@@ -187,7 +187,11 @@ function Login({ onLogin }) {
     <div className="login-page">
       <div className="login-card">
         <div className="login-logo">
-          <div className="login-logo__icon">☕</div>
+          <img
+            src="./mars-lounge-logo.png"
+            alt="Mars Lounge Cafe"
+            className="login-logo__icon"
+          />
           <h1 className="login-logo__name">Mars Lounge</h1>
           <p className="login-logo__sub">Cafe Yönetim Sistemi</p>
         </div>

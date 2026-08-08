@@ -31,7 +31,7 @@
       {
         "provider": "github",
         "owner": "ZiyaOzgul",
-        "repo": "mars-lounge-cafe",
+        "repo": "mars-lounge",
         "releaseType": "release"
       }
     ],
@@ -47,7 +47,9 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "public/icon.ico",
+      "uninstallerIcon": "public/icon.ico"
     }
   },
   "devDependencies": {
