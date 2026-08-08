@@ -1,0 +1,293 @@
+/* ── Ingredients page ─────────────────────────────────────────── */
+.ingredients-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* ── Header ── */
+.ingredients-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 28px 16px;
+  flex-shrink: 0;
+}
+
+.ingredients-header__left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.ingredients-title {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  margin: 0;
+}
+
+.ingredients-low-badge {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-danger);
+  background: var(--color-danger-light);
+  border-radius: var(--radius-pill);
+  padding: 3px 10px;
+}
+
+.ingredients-header__right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* ── Search ── */
+.ingredients-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 7px 12px;
+  color: var(--color-text-muted);
+}
+
+.ingredients-search input {
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 13px;
+  color: var(--color-text-primary);
+  width: 200px;
+}
+
+.ingredients-search input::placeholder {
+  color: var(--color-text-muted);
+}
+
+/* ── Add button ── */
+.btn-add-ingredient {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  background: var(--color-accent);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.btn-add-ingredient:hover {
+  background: var(--color-accent-hover);
+}
+
+/* ── Grid ── */
+.ingredients-grid {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 28px 28px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(185px, 1fr));
+  gap: 14px;
+  align-content: start;
+}
+
+/* ── Ingredient card ── */
+.ingredient-card {
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  padding: 16px 18px;
+  position: relative;
+  transition: box-shadow 0.15s, transform 0.15s;
+}
+
+.ingredient-card:hover {
+  box-shadow: var(--color-shadow-md);
+  transform: translateY(-1px);
+}
+
+.ingredient-card--low {
+  border-color: var(--color-danger);
+  background: #fff8f8;
+}
+
+.ingredient-card__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.ingredient-card__name {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  margin: 0;
+  word-break: break-word;
+}
+
+.ingredient-card__unit {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  background: var(--color-bg-page);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  padding: 2px 8px;
+  flex-shrink: 0;
+}
+
+.ingredient-card__stock {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.ingredient-card__amount {
+  font-size: 28px;
+  font-weight: 800;
+  color: var(--color-text-primary);
+  line-height: 1;
+}
+
+.ingredient-card__amount--low {
+  color: var(--color-danger);
+}
+
+.ingredient-card__stock-label {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+
+.ingredient-card__alert-info {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  margin: 0;
+}
+
+.ingredient-card__alert-info--low {
+  color: var(--color-danger);
+  font-weight: 600;
+}
+
+/* ── Hover actions (reuse from Products) ── */
+.ingredient-card__actions {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: 4px;
+}
+
+/* ── Empty state ── */
+.ingredients-empty {
+  grid-column: 1 / -1;
+  text-align: center;
+  padding: 60px 0;
+  color: var(--color-text-muted);
+  font-size: 14px;
+}
+
+/* ── Card image zone ── */
+.ingredient-card__image {
+  height: 150px;
+  margin: -16px -18px 12px;
+  border-radius: var(--radius-card) var(--radius-card) 0 0;
+  overflow: hidden;
+  background: var(--color-bg-page);
+  border-bottom: 1px solid var(--color-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ingredient-card__image-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.ingredient-card__base-amount {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  margin: 0 0 4px;
+}
+
+/* ── Modal ── */
+.ingredient-modal {
+  width: 480px;
+}
+
+.ingredient-modal__body {
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.ingredient-image-picker {
+  height: 100px;
+  border: 2px dashed var(--color-border);
+  border-radius: var(--radius-input);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color 0.15s;
+}
+
+.ingredient-image-picker:hover {
+  border-color: var(--color-accent);
+}
+
+.ingredient-image-picker__img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.ingredient-image-picker__placeholder {
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+
+.ingredient-image-picker__remove {
+  margin-top: 4px;
+  background: none;
+  border: none;
+  font-size: 12px;
+  color: var(--color-danger);
+  cursor: pointer;
+  padding: 0;
+}
+
+.ingredient-image-picker__remove:hover {
+  text-decoration: underline;
+}
+
+.pm-label-hint {
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+.pm-hint {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  background: var(--color-accent-light);
+  border-radius: var(--radius-input);
+  padding: 8px 12px;
+  margin: 0;
+}

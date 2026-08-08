@@ -1,0 +1,255 @@
+/* ── Page layout ─────────────────────────────────────────────── */
+
+.closed-tables-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  background: var(--color-bg-page);
+  padding: 0 24px 24px;
+  gap: 0;
+}
+
+/* ── Header ──────────────────────────────────────────────────── */
+
+.ct-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 0 16px;
+}
+
+.ct-header__title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.ct-header__title h1 {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  margin: 0;
+}
+
+.ct-header__count {
+  font-size: 13px;
+  color: var(--color-text-muted);
+  font-weight: 500;
+}
+
+.ct-refresh-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-card);
+  color: var(--color-text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.ct-refresh-btn:hover {
+  background: var(--color-accent-light);
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.ct-refresh-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ct-refresh-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+@keyframes ct-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+.ct-spinning {
+  animation: ct-spin 0.7s linear infinite;
+}
+
+/* ── Date tabs ───────────────────────────────────────────────── */
+
+.ct-tabs {
+  display: flex;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  padding: 3px;
+  gap: 2px;
+  width: fit-content;
+  margin-bottom: 16px;
+}
+
+.ct-tab {
+  padding: 6px 16px;
+  border-radius: var(--radius-pill);
+  border: none;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.ct-tab:hover {
+  color: var(--color-text-primary);
+  background: var(--color-bg-page);
+}
+
+.ct-tab--active {
+  background: var(--color-accent) !important;
+  color: #fff !important;
+  box-shadow: 0 1px 4px rgba(232, 151, 90, 0.35);
+}
+
+/* ── List ────────────────────────────────────────────────────── */
+
+.ct-list {
+  flex: 1;
+  overflow-y: auto;
+  padding-right: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.ct-list::-webkit-scrollbar {
+  width: 5px;
+}
+
+.ct-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.ct-list::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 10px;
+}
+
+.ct-day-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ct-day-header {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+  padding: 0 2px;
+}
+
+.ct-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ct-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  padding: 12px 16px;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  box-shadow: var(--color-shadow);
+  transition: box-shadow 0.15s, border-color 0.15s;
+}
+
+.ct-row:hover {
+  box-shadow: var(--color-shadow-md);
+  border-color: var(--color-accent);
+}
+
+.ct-row__main {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.ct-row__table {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.ct-row__time {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.ct-row__payment {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-accent);
+  background: var(--color-accent-light);
+  border-radius: var(--radius-pill);
+  padding: 2px 9px;
+  margin-left: auto;
+}
+
+.ct-row__summary {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ct-row__total {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--color-accent);
+}
+
+/* ── Empty / loading state ───────────────────────────────────── */
+
+.ct-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 60px 20px;
+  color: var(--color-text-muted);
+}
+
+.ct-empty svg {
+  width: 52px;
+  height: 52px;
+  opacity: 0.35;
+}
+
+.ct-empty p {
+  font-size: 14px;
+  font-weight: 500;
+  margin: 0;
+}
+
+.ct-spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--color-border);
+  border-top-color: var(--color-accent);
+  border-radius: 50%;
+  animation: ct-spin 0.7s linear infinite;
+}

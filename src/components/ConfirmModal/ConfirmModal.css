@@ -1,0 +1,101 @@
+.confirm-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(15, 18, 25, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+  animation: confirm-modal-fade 0.12s ease-out;
+}
+
+.confirm-modal {
+  background-color: var(--color-bg-card);
+  border-radius: var(--radius-card);
+  box-shadow: var(--color-shadow-md);
+  width: 100%;
+  max-width: 380px;
+  overflow: hidden;
+  animation: confirm-modal-pop 0.14s ease-out;
+}
+
+.confirm-modal__header {
+  padding: 18px 22px 0;
+}
+
+.confirm-modal__title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  margin: 0;
+}
+
+.confirm-modal__body {
+  padding: 12px 22px 18px;
+}
+
+.confirm-modal__text {
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--color-text-secondary);
+  margin: 0;
+}
+
+.confirm-modal__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0 22px 18px;
+}
+
+.confirm-modal__cancel,
+.confirm-modal__confirm {
+  font-family: var(--font-main);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 9px 16px;
+  border-radius: var(--radius-input);
+  border: 1px solid var(--color-border);
+  cursor: pointer;
+  transition: background-color 0.12s, border-color 0.12s;
+}
+
+.confirm-modal__cancel {
+  background-color: var(--color-bg-card);
+  color: var(--color-text-primary);
+}
+
+.confirm-modal__cancel:hover {
+  background-color: var(--color-bg-page);
+}
+
+.confirm-modal__confirm {
+  background-color: var(--color-accent);
+  color: #fff;
+  border-color: var(--color-accent);
+}
+
+.confirm-modal__confirm:hover {
+  background-color: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
+}
+
+.confirm-modal__confirm--danger {
+  background-color: var(--color-danger);
+  border-color: var(--color-danger);
+}
+
+.confirm-modal__confirm--danger:hover {
+  background-color: #dc2626;
+  border-color: #dc2626;
+}
+
+@keyframes confirm-modal-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes confirm-modal-pop {
+  from { opacity: 0; transform: translateY(6px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}

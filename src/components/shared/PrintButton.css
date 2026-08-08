@@ -1,0 +1,142 @@
+/* ── Yazdır (print) button + picker ── */
+.pb-print {
+  position: relative;
+}
+
+.pb-print__btn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 14px;
+  border-radius: var(--radius-input);
+  background-color: var(--color-bg-page);
+  border: 1.5px solid var(--color-border);
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.pb-print__btn:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+/* Icon-only square variant — used next to "Masayı Kapat" in OrderPanel's
+   footer, where the label would crowd out the primary button. Stretches to
+   match a sibling's height (e.g. "Masayı Kapat"); min-height covers the
+   case where it renders alone. */
+.pb-print__btn--compact {
+  align-self: stretch;
+  aspect-ratio: 1;
+  min-height: 40px;
+  padding: 0;
+  justify-content: center;
+}
+
+.pb-print__picker {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 260px;
+  background-color: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--color-shadow-md);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  z-index: 20;
+}
+
+/* Opens upward instead of downward — needed when the button sits in a
+   bottom footer with no room below it. */
+.pb-print--drop-up .pb-print__picker {
+  top: auto;
+  bottom: calc(100% + 8px);
+}
+
+.pb-print__picker-title {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  padding: 2px 6px 6px;
+}
+
+.pb-print__note {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  padding: 4px 6px;
+  margin: 0;
+}
+
+.pb-print__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 10px;
+  border-radius: var(--radius-input);
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  text-align: left;
+  transition: background-color 0.12s ease;
+}
+
+.pb-print__row:hover {
+  background-color: var(--color-accent-light);
+}
+
+.pb-print__row:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.pb-print__row-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pb-print__row-tags {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.pb-print__chip {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: var(--radius-pill);
+  background-color: var(--color-accent-light);
+  color: var(--color-accent);
+  white-space: nowrap;
+}
+
+.pb-print__chip--last {
+  background-color: var(--color-success-light);
+  color: var(--color-success);
+}
+
+.pb-print__status {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-success);
+  padding: 6px 6px 2px;
+  margin: 0;
+}
+
+.pb-print__status--error {
+  color: var(--color-danger);
+}

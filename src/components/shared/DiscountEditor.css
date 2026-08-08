@@ -1,0 +1,104 @@
+/* Shared inline discount entry form — used inside OrderPanel + PaymentModal totals */
+.de-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  margin: 2px 0 4px;
+  background: var(--color-accent-light);
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-input);
+}
+
+.de-editor__amount-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-input);
+  padding: 6px 10px;
+}
+
+.de-editor__prefix {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--color-text-secondary);
+}
+
+.de-editor__amount {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  background: transparent;
+}
+
+.de-editor__quick {
+  display: flex;
+  gap: 6px;
+}
+
+.de-editor__quick-btn {
+  flex: 1;
+  padding: 5px 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-accent-hover);
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-pill);
+}
+.de-editor__quick-btn:hover { background: var(--color-accent-light); }
+
+.de-editor__label {
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 13px;
+  color: var(--color-text-primary);
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-input);
+  outline: none;
+}
+.de-editor__label:focus { border-color: var(--color-accent); }
+
+.de-editor__error {
+  font-size: 11px;
+  color: var(--color-danger);
+}
+
+.de-editor__actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.de-editor__btn {
+  flex: 1;
+  padding: 7px 0;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: var(--radius-input);
+}
+
+.de-editor__btn--ghost {
+  color: var(--color-text-secondary);
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+}
+.de-editor__btn--ghost:hover { background: var(--color-bg-page); }
+
+.de-editor__btn--primary {
+  color: #fff;
+  background: var(--color-accent);
+  border: 1px solid var(--color-accent);
+}
+.de-editor__btn--primary:hover:not(:disabled) { background: var(--color-accent-hover); }
+.de-editor__btn--primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
