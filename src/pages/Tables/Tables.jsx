@@ -58,6 +58,66 @@ function Tables() {
   // not just while this page is mounted.
 
   // ── Realtime QR order subscription ──────────────────────────────
+  // Turns one pending order row into a queued approval card. Shared by the
+  // realtime handler and the catch-up sweep below so both paths build the
+  // exact same shape and hit the same de-dupe.
+  const enqueuePendingOrder = useCallback(async (newOrder, { alert = true } = {}) => {
+    if (!newOrder?.table_id) {
+      console.warn('[QR-DEBUG] Aborted: order has no table_id', newOrder)
+      return
+    }
+    if (alert) playAlertSound()
+
+    const openMinutes = newOrder.created_at
+      ? Math.max(0, Math.floor((Date.now() - new Date(newOrder.created_at).getTime()) / 60000))
+      : 0
+
+    let orderItems = []
+    try {
+      const { data, error } = await supabase
+        .from('order_items')
+        .select('id, quantity, unit_price, products(name), order_item_modifiers(id, modifier_id, name, price_delta, quantity)')
+        .eq('order_id', newOrder.id)
+      if (error) console.warn('[QR-DEBUG] order_items query error:', error)
+      if (data) {
+        orderItems = data.map(item => ({
+          id:        item.id,
+          name:      item.products?.name ?? 'Ürün',
+          qty:       item.quantity,
+          unitPrice: item.unit_price,
+          note:      '',
+          modifiers: (item.order_item_modifiers ?? []).map(m => ({
+            id:         m.id,
+            modifierId: m.modifier_id ?? null,
+            name:       m.name,
+            priceDelta: Number(m.price_delta) || 0,
+            quantity:   Number(m.quantity) || 1,
+          })),
+        }))
+      }
+    } catch (e) {
+      console.warn('[QR-DEBUG] Could not fetch QR order items', e)
+    }
+
+    console.log('[QR-DEBUG] Pushing to qrQueue:', { tableId: newOrder.table_id, orderId: newOrder.id, itemCount: orderItems.length })
+    // Realtime can re-deliver on reconnect, and the catch-up sweep re-reads
+    // the same rows — never queue the same order twice
+    setQrQueue(prev => prev.some(q => q.orderId === newOrder.id) ? prev : [...prev, {
+      tableId:    newOrder.table_id,
+      orderId:    newOrder.id,
+      openMinutes,
+      orderItems,
+    }])
+    setRuntimeStates(prev => ({
+      ...prev,
+      [newOrder.table_id]: {
+        ...(prev[newOrder.table_id] ?? {}),
+        status: 'occupied',
+        type:   'qr',
+      },
+    }))
+  }, [setRuntimeStates])
+
   useEffect(() => {
     if (!isSupabaseReady) return
 
@@ -66,69 +126,47 @@ function Tables() {
       .on(
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'orders', filter: 'status=eq.pending' },
-        async (payload) => {
-          playAlertSound()
-          const newOrder = payload.new
-          console.log('[QR-DEBUG] Realtime INSERT received:', newOrder)
-          if (!newOrder?.table_id) {
-            console.warn('[QR-DEBUG] Aborted: order has no table_id', newOrder)
-            return
-          }
-
-          const openMinutes = newOrder.created_at
-            ? Math.max(0, Math.floor((Date.now() - new Date(newOrder.created_at).getTime()) / 60000))
-            : 0
-
-          let orderItems = []
-          try {
-            const { data, error } = await supabase
-              .from('order_items')
-              .select('id, quantity, unit_price, products(name), order_item_modifiers(id, modifier_id, name, price_delta, quantity)')
-              .eq('order_id', newOrder.id)
-            if (error) console.warn('[QR-DEBUG] order_items query error:', error)
-            console.log('[QR-DEBUG] order_items fetched:', data)
-            if (data) {
-              orderItems = data.map(item => ({
-                id:        item.id,
-                name:      item.products?.name ?? 'Ürün',
-                qty:       item.quantity,
-                unitPrice: item.unit_price,
-                note:      '',
-                modifiers: (item.order_item_modifiers ?? []).map(m => ({
-                  id:         m.id,
-                  modifierId: m.modifier_id ?? null,
-                  name:       m.name,
-                  priceDelta: Number(m.price_delta) || 0,
-                  quantity:   Number(m.quantity) || 1,
-                })),
-              }))
-            }
-          } catch (e) {
-            console.warn('[QR-DEBUG] Could not fetch QR order items', e)
-          }
-
-          console.log('[QR-DEBUG] Pushing to qrQueue:', { tableId: newOrder.table_id, orderId: newOrder.id, itemCount: orderItems.length })
-          // Realtime can re-deliver on reconnect — never queue the same order twice
-          setQrQueue(prev => prev.some(q => q.orderId === newOrder.id) ? prev : [...prev, {
-            tableId:    newOrder.table_id,
-            orderId:    newOrder.id,
-            openMinutes,
-            orderItems,
-          }])
-          setRuntimeStates(prev => ({
-            ...prev,
-            [newOrder.table_id]: {
-              ...(prev[newOrder.table_id] ?? {}),
-              status: 'occupied',
-              type:   'qr',
-            },
-          }))
+        (payload) => {
+          console.log('[QR-DEBUG] Realtime INSERT received:', payload.new)
+          enqueuePendingOrder(payload.new)
         }
       )
       .subscribe()
 
     return () => { supabase.removeChannel(channel) }
-  }, [setRuntimeStates])
+  }, [enqueuePendingOrder])
+
+  // ── Catch-up sweep for missed QR orders ─────────────────────────
+  // A pending order reaches the desktop ONLY through the realtime handler
+  // above — pullFromSupabase filters on status='active', so nothing else ever
+  // reads it. If the app was closed, on another page, or the socket dropped
+  // when the order landed, it would stay invisible forever. Re-read pending
+  // rows on mount and whenever the connection comes back so a missed order
+  // still lands in the approval queue. No sound: these are not new arrivals.
+  useEffect(() => {
+    if (!isSupabaseReady || !isOnline) return
+    let cancelled = false
+
+    ;(async () => {
+      const { data, error } = await supabase
+        .from('orders')
+        .select('id, table_id, created_at')
+        .eq('status', 'pending')
+        .not('table_id', 'is', null)
+      if (error) {
+        console.warn('[QR-DEBUG] Bekleyen sipariş taraması başarısız', error)
+        return
+      }
+      if (cancelled || !data?.length) return
+      console.log(`[QR-DEBUG] Catch-up: ${data.length} bekleyen sipariş bulundu`)
+      for (const o of data) {
+        if (cancelled) return
+        await enqueuePendingOrder(o, { alert: false })
+      }
+    })()
+
+    return () => { cancelled = true }
+  }, [isOnline, enqueuePendingOrder])
 
   // Auto-open QR approval modal when a new QR order arrives.
   // Adjust-during-render (guarded) instead of a setState-in-effect.

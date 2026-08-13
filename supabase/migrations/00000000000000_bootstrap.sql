@@ -159,7 +159,10 @@ CREATE TABLE IF NOT EXISTS public.orders (
   payment_method        text,
   total                 numeric(10,2) DEFAULT 0,
   is_synced             boolean DEFAULT false,
-  created_at            timestamp with time zone,
+  -- DEFAULT now() şart: QR/web menüsü insert'te created_at göndermiyor ve
+  -- varsayılan olmadan satır NULL kalıyor (masa açılış süresi, sıralama ve
+  -- tarih filtreleri bozuluyor).
+  created_at            timestamp with time zone DEFAULT now(),
   closed_at             timestamp with time zone,
   table_id              integer REFERENCES public.tables(id) ON DELETE SET NULL,
   closed_by             uuid REFERENCES auth.users(id),
