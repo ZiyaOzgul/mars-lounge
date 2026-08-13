@@ -34,7 +34,11 @@ function newLocalId() {
 export function isDbInitialized() { return db !== null }
 
 // ── Seed data (inserted once on first run) ────────────────────────
-const SEED_TABLE_DEFS = Array.from({ length: 20 }, (_, i) => ({ id: i + 1, name: `Masa-${i + 1}` }))
+// Masa sayısı. Supabase'deki public.tables ile AYNI id aralığını (1..N)
+// kaplamak zorunda: siparişler table_id'yi olduğu gibi Supabase'e gönderiyor,
+// karşılıkta satır yoksa foreign key hatası alınır.
+const TABLE_DEF_COUNT = 30
+const SEED_TABLE_DEFS = Array.from({ length: TABLE_DEF_COUNT }, (_, i) => ({ id: i + 1, name: `Masa-${i + 1}` }))
 
 
 // ── Schema ────────────────────────────────────────────────────────
@@ -346,14 +350,48 @@ export async function initDb() {
     await persistDb()
   }
 
-  // One-time migration: replace old zero-padded / incomplete table list with Masa-1..20
+  // Migration: drop the legacy zero-padded list ('Masa-01' …), then top the
+  // table list up to TABLE_DEF_COUNT. The fill is ADDITIVE on purpose — it
+  // only inserts ids that are missing, so raising the table count never wipes
+  // a table the user renamed ("Masa-7" → "Teras 1") in an earlier version.
   const hasOldNames = db.exec("SELECT COUNT(*) FROM table_defs WHERE name LIKE 'Masa-0%'")?.[0]?.values?.[0]?.[0] > 0
-  const tableCount  = db.exec('SELECT COUNT(*) FROM table_defs WHERE id BETWEEN 1 AND 20')?.[0]?.values?.[0]?.[0]
-  if (hasOldNames || tableCount < 20) {
-    db.run('DELETE FROM table_defs WHERE id BETWEEN 1 AND 20')
-    for (let i = 1; i <= 20; i++) {
-      db.run('INSERT INTO table_defs (id, name) VALUES (?, ?)', [i, `Masa-${i}`])
+  if (hasOldNames) {
+    db.run('DELETE FROM table_defs WHERE id BETWEEN 1 AND ?', [TABLE_DEF_COUNT])
+  }
+  const existingRes = db.exec('SELECT id FROM table_defs WHERE id BETWEEN 1 AND ?', [TABLE_DEF_COUNT])
+  const existingIds = new Set(existingRes.length ? existingRes[0].values.map(([id]) => id) : [])
+  let addedTableDefs = 0
+  for (let i = 1; i <= TABLE_DEF_COUNT; i++) {
+    if (existingIds.has(i)) continue
+    db.run('INSERT INTO table_defs (id, name) VALUES (?, ?)', [i, `Masa-${i}`])
+    addedTableDefs++
+  }
+  if (hasOldNames || addedTableDefs > 0) {
+    await persistDb()
+  }
+
+  // One-time cleanup: the Settings "Masa Ekle" button minted ids from
+  // Date.now(), which overflows Supabase's int4 orders.table_id — those tables
+  // could never sync, and now that 1..TABLE_DEF_COUNT is seeded they also show
+  // up as visual duplicates ("Masa 21" beside "Masa-21"). Drop the ones no
+  // local order references; anything with history is kept so nothing is
+  // orphaned. Guarded by a meta flag so a deliberately added table later is
+  // not deleted out from under the user on the next restart.
+  const dedupeRes  = db.exec("SELECT value FROM meta WHERE key = 'table-defs-dedupe-v1'")
+  const dedupeDone = dedupeRes.length && dedupeRes[0].values.length
+  if (!dedupeDone) {
+    const strayRes = db.exec(
+      `SELECT id, name FROM table_defs
+        WHERE id NOT BETWEEN 1 AND ?
+          AND id NOT IN (SELECT table_id FROM orders WHERE table_id IS NOT NULL)`,
+      [TABLE_DEF_COUNT]
+    )
+    const strays = strayRes.length ? strayRes[0].values : []
+    for (const [id, name] of strays) {
+      db.run('DELETE FROM table_defs WHERE id = ?', [id])
+      console.log(`[localDb] Senkronlanamayan yinelenen masa silindi: ${name} (id ${id})`)
     }
+    db.run("INSERT OR REPLACE INTO meta (key, value) VALUES ('table-defs-dedupe-v1', '1')", [])
     await persistDb()
   }
 
