@@ -151,6 +151,12 @@
   grid-template-columns: repeat(auto-fill, minmax(185px, 1fr));
   gap: 14px;
   align-content: start;
+  /* Satırlar içeriğe göre boyutlansın. Bu olmadan: grid'in kendisi flex:1 ile
+     belirli bir yüksekliğe sahip oluyor, .product-card'daki overflow:hidden de
+     kartın minimum boyutunu sıfırlıyor — sonuçta satırlar ekrana sığacak kadar
+     eziliyor, kartların büyük kısmı kırpılıyor ve sayfa hiç kaymıyor.
+     88 üründe kartlar 285px yerine 93px yüksekliğe düşüyordu. */
+  grid-auto-rows: max-content;
 }
 
 /* ── Product card ── */
