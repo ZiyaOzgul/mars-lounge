@@ -5,7 +5,12 @@
   padding: 16px;
   cursor: pointer;
   transition: box-shadow 0.15s ease, transform 0.1s ease;
-  min-height: 160px;
+  /* Dolu bir kart (sure + bosta etiketi + urun/tutar satirlari) dogal olarak
+     ~197px oluyor. min-height 160'ta kaldiginda o kartin bulundugu grid satiri
+     esniyor, digerleri kisa kaliyordu: ekranda 1. satir uzun, geri kalani
+     bariz kisa gorunuyordu. Esik dolu kartin dogal boyunun ustune cekildi ki
+     tum satirlar ayni yukseklikte olsun. */
+  min-height: 200px;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -26,7 +31,7 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  opacity: 0.18;
+  opacity: 0.4;
   z-index: -1;
   pointer-events: none;
   user-select: none;
@@ -47,6 +52,12 @@
 }
 
 .table-card__watermark-no {
+  /* Sabit genislik: tek haneli ve cift haneli masalarda filigran blogu ayni
+     boyda kalsin. Aksi halde ilk satir (1-8) dar, sonraki satirlar (9-30)
+     belirgin sekilde genis gorunuyor ve kartlar sikismis izlenimi veriyor. */
+  min-width: 2ch;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
   font-size: 50px;
   font-weight: 800;
   line-height: 1;
