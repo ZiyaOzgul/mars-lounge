@@ -17,6 +17,10 @@ import QRApprovalModal from '../../components/QRApprovalModal/QRApprovalModal.js
 import './Tables.css'
 
 
+// Kaçırılan QR siparişlerini yakalama turu. Realtime asıl yol; bu yalnızca
+// soket sessizce koptuğunda devreye giren emniyet ağı.
+const PENDING_SWEEP_MS = 45_000
+
 function getLiveTime() {
   return new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })
 }
@@ -126,7 +130,12 @@ function Tables() {
           enqueuePendingOrder(payload.new)
         }
       )
-      .subscribe()
+      .subscribe((status) => {
+        // Kanal durumu sessizce bozulabiliyordu; en azından konsola düşsün ki
+        // "sipariş düşmedi" şikayetinde bakılacak bir iz olsun.
+        if (status === 'SUBSCRIBED') console.log('[QR-DEBUG] realtime kanal bağlandı')
+        else console.warn('[QR-DEBUG] realtime kanal durumu:', status)
+      })
 
     return () => { supabase.removeChannel(channel) }
   }, [enqueuePendingOrder])
@@ -134,15 +143,19 @@ function Tables() {
   // ── Catch-up sweep for missed QR orders ─────────────────────────
   // A pending order reaches the desktop ONLY through the realtime handler
   // above — pullFromSupabase filters on status='active', so nothing else ever
-  // reads it. If the app was closed, on another page, or the socket dropped
-  // when the order landed, it would stay invisible forever. Re-read pending
-  // rows on mount and whenever the connection comes back so a missed order
-  // still lands in the approval queue. No sound: these are not new arrivals.
+  // reads it. If the socket drops, the order stays invisible.
+  //
+  // Mount + reconnect alone was not enough: a register stays open all day, and
+  // when the websocket dies silently the OS is still online, so navigator.onLine
+  // never flips and nothing re-triggers. Hence the periodic tick — it is the
+  // only path that recovers a missed QR order without restarting the app.
+  // De-dupe in enqueuePendingOrder makes repeat runs harmless; no sound,
+  // because these are not fresh arrivals.
   useEffect(() => {
     if (!isSupabaseReady || !isOnline) return
     let cancelled = false
 
-    ;(async () => {
+    const sweep = async () => {
       const { data, error } = await supabase
         .from('orders')
         .select('id, table_id, created_at')
@@ -158,9 +171,11 @@ function Tables() {
         if (cancelled) return
         await enqueuePendingOrder(o, { alert: false })
       }
-    })()
+    }
 
-    return () => { cancelled = true }
+    sweep()
+    const timer = setInterval(sweep, PENDING_SWEEP_MS)
+    return () => { cancelled = true; clearInterval(timer) }
   }, [isOnline, enqueuePendingOrder])
 
   // Auto-open QR approval modal when a new QR order arrives.
@@ -487,40 +502,68 @@ function Tables() {
       if (!scopeGroupLocalId) setSelectedTableId(null)
       try {
         const { lowStockWarnings } = await saveCompletedOrder(transactionData)
+
+        // ── Uzak satırları ÖNCE kapat ──
+        // Sıra kritik: pullFromSupabase status='active' satırları geri çekiyor.
+        // Yerel kaydı önce silip uzak satırı sonra kapatırsak, aradaki pencerede
+        // düşen bir senkron turu siparişi masaya geri koyuyordu — "sildiğim
+        // sipariş geri geliyor" şikayetinin kaynağı buydu. Artık uzak taraf
+        // kapanmadan yerel kayda dokunmuyoruz.
+        let remoteClosed = true
+        if (isSupabaseReady) {
+          const remoteIds = [...new Set(
+            [transactionData.supabaseOrderId, ...groups.map(g => g.supabaseOrderId)]
+              .filter(rid => rid != null)
+              .map(Number)
+          )]
+          for (const rid of remoteIds) {
+            const patch = {
+              status: 'completed',
+              payment_method: transactionData.paymentMethod,
+              closed_at: transactionData.closedAt,
+            }
+            // Toplam yalnızca ana siparişe yazılır; QR alt siparişleri kendi
+            // tutarlarını korur.
+            if (rid === Number(transactionData.supabaseOrderId)) patch.total = transactionData.total
+
+            // Tek seferlik yeniden deneme: kapanış anındaki geçici ağ hatası
+            // siparişin geri gelmesine yol açmasın.
+            let lastErr = null
+            for (let attempt = 0; attempt < 2; attempt++) {
+              const { error } = await supabase.from('orders').update(patch).eq('id', rid)
+              if (!error) { lastErr = null; break }
+              lastErr = error
+            }
+            if (lastErr) {
+              remoteClosed = false
+              console.error(`[Tables] ✗ Uzak sipariş kapatılamadı (remote:${rid})`, lastErr)
+            }
+          }
+        }
+
         // The debounced persister may have materialized these groups as ACTIVE
         // local orders. Remove them now — otherwise the ghost-cleanup pass in
-        // AppContext flips the remote QR orders we're about to mark completed
-        // back to 'cancelled', and the customer loses the loyalty points the
+        // AppContext flips the remote QR orders we just marked completed back
+        // to 'cancelled', and the customer loses the loyalty points the
         // completion trigger just awarded.
-        try {
-          const closedGroupIds = new Set(groups.map(g => String(g.localId)))
-          for (const o of getAllActiveOrders()) {
-            if (closedGroupIds.has(String(o.local_id))) await deleteActiveOrderCascade(o.id)
+        //
+        // Uzak kapanış başarısızsa yerel kaydı BİLEREK bırakıyoruz: silersek
+        // uzak satır 'active' kalır ve bir sonraki senkronda sipariş yeniden
+        // belirir. Duran kayıt, senkronun tekrar denemesine imkan verir.
+        if (remoteClosed) {
+          try {
+            const closedGroupIds = new Set(groups.map(g => String(g.localId)))
+            for (const o of getAllActiveOrders()) {
+              if (closedGroupIds.has(String(o.local_id))) await deleteActiveOrderCascade(o.id)
+            }
+          } catch (e) {
+            console.warn('[Tables] ghost active-order cleanup failed', e)
           }
-        } catch (e) {
-          console.warn('[Tables] ghost active-order cleanup failed', e)
+        } else {
+          console.warn('[Tables] ⚠ Uzak kapanış eksik — yerel aktif kayıt korundu, senkron tekrar deneyecek')
         }
         if (lowStockWarnings?.length) setLowStockAlerts(lowStockWarnings)
         console.log(`[Tables] ✓ Order completed — Masa ${tableId} | ₺${transactionData.total?.toFixed(2)} | ${transactionData.paymentMethod}`)
-        if (transactionData.supabaseOrderId && isSupabaseReady) {
-          await supabase
-            .from('orders')
-            .update({ status: 'completed', payment_method: transactionData.paymentMethod, total: transactionData.total, closed_at: transactionData.closedAt })
-            .eq('id', transactionData.supabaseOrderId)
-        }
-        // Whole-table close: QR sub-orders live as their own rows in Supabase —
-        // flip them too, otherwise they stay 'active' and reappear on mobile
-        if (isSupabaseReady) {
-          const remoteGroupIds = groups
-            .map(g => g.supabaseOrderId)
-            .filter(rid => rid != null && rid !== transactionData.supabaseOrderId)
-          for (const rid of remoteGroupIds) {
-            await supabase
-              .from('orders')
-              .update({ status: 'completed', payment_method: transactionData.paymentMethod, closed_at: transactionData.closedAt })
-              .eq('id', rid)
-          }
-        }
         // Table just closed — free it up remotely if nothing else is active there
         if (isSupabaseReady) {
           try {
