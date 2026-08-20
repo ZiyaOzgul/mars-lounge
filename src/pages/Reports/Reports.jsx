@@ -16,6 +16,7 @@ import './Reports.css'
 
 const TABS = [
   { id: 'today', label: 'Bugün',    revenueLabel: 'Günlük Ciro',   orderLabel: 'Bugünkü Sipariş',  chartTitle: 'Saatlik Ciro' },
+  { id: 'yesterday', label: 'Dün',  revenueLabel: 'Dünkü Ciro',    orderLabel: 'Dünkü Sipariş',    chartTitle: 'Saatlik Ciro' },
   { id: 'week',  label: 'Bu Hafta', revenueLabel: 'Haftalık Ciro', orderLabel: 'Haftalık Sipariş', chartTitle: 'Günlük Ciro' },
   { id: 'month', label: 'Bu Ay',    revenueLabel: 'Aylık Ciro',    orderLabel: 'Aylık Sipariş',    chartTitle: 'Günlük Ciro' },
   { id: 'total', label: 'Toplam',   revenueLabel: 'Toplam Ciro',   orderLabel: 'Toplam Sipariş',   chartTitle: 'Aylık Ciro' },
@@ -23,7 +24,20 @@ const TABS = [
 
 const PIE_COLORS = ['#e8975a', '#6366f1', '#0d9488']
 
-function getDateRange(tabId) {
+// Tarih seçiciyle seçilen gün sekme çubuğunda görünmez, ama başlık ve KPI
+// etiketleri TABS kayıtlarından okunduğu için aynı şekle sahip bir karşılığı olmalı.
+const DAY_TAB = {
+  id: 'day', label: 'Seçilen Gün', revenueLabel: 'Günlük Ciro',
+  orderLabel: 'Günlük Sipariş', chartTitle: 'Saatlik Ciro',
+}
+
+// Saatlik grafik ve x ekseni sıklığı bu modlarda ortak davranır.
+const SINGLE_DAY_TABS = new Set(['today', 'yesterday', 'day'])
+
+const pad2 = n => String(n).padStart(2, '0')
+const toIso = d => d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate())
+
+function getDateRange(tabId, customDay) {
   const now = new Date()
   const pad = n => String(n).padStart(2, '0')
   const fmt = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`
@@ -31,6 +45,16 @@ function getDateRange(tabId) {
   if (tabId === 'today') {
     const today = fmt(now)
     return [today, today]
+  }
+  if (tabId === 'yesterday') {
+    const y = new Date(now)
+    y.setDate(now.getDate() - 1)
+    const iso = fmt(y)
+    return [iso, iso]
+  }
+  if (tabId === 'day') {
+    const iso = customDay || fmt(now)
+    return [iso, iso]
   }
   if (tabId === 'week') {
     const day = now.getDay()
@@ -64,6 +88,7 @@ function CustomBarTooltip({ active, payload, label }) {
 function Reports() {
   const { dbReady } = useApp()
   const [activeTab,    setActiveTab]    = useState('today')
+  const [customDay,    setCustomDay]    = useState(() => toIso(new Date()))
   const [kpis,         setKpis]         = useState({ revenue: 0, orderCount: 0, avgOrder: 0 })
   const [topProduct,   setTopProduct]   = useState({ name: '—', qty: 0 })
   const [periodData,   setPeriodData]   = useState([])
@@ -85,10 +110,10 @@ function Reports() {
   /* eslint-disable react-hooks/set-state-in-effect -- reads the external sql.js store into state */
   useEffect(() => {
     if (!dbReady) return
-    const [start, end] = getDateRange(activeTab)
+    const [start, end] = getDateRange(activeTab, customDay)
     setKpis(getReportKpis(start, end))
     setTopProduct(getTopProduct(start, end))
-    setPeriodData(getRevenueByPeriod(activeTab))
+    setPeriodData(getRevenueByPeriod(activeTab, start))
     setPaymentData(getPaymentBreakdown(start, end))
     setPaymentDetail(getPaymentMethodDetail(start, end))
     setTableRevData(getTableRevenue(start, end))
@@ -99,21 +124,21 @@ function Reports() {
     setIngredientData(getIngredientConsumption(start, end))
     setOrdersList(getOrdersList(start, end))
     setExpandedOrderId(null)
-  }, [activeTab, dbReady])
+  }, [activeTab, customDay, dbReady])
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  const tab = TABS.find(t => t.id === activeTab)
+  const tab = TABS.find(t => t.id === activeTab) ?? DAY_TAB
   const totalPayment = paymentData.reduce((s, d) => s + d.value, 0)
   const maxTableRev  = tableRevData.reduce((m, r) => Math.max(m, r.value), 0) || 1
 
   function openTableModal(row) {
-    const [start, end] = getDateRange(activeTab)
+    const [start, end] = getDateRange(activeTab, customDay)
     const items = getTableProductBreakdown(row.name, start, end)
     setTableModal({ name: row.name, items, total: row.value })
   }
 
   function openProductModal(p) {
-    const [start, end] = getDateRange(activeTab)
+    const [start, end] = getDateRange(activeTab, customDay)
     const rows = getProductTableBreakdown(p.name, start, end)
     setProductModal({ name: p.name, qty: p.qty, revenue: p.revenue, rows })
   }
@@ -129,7 +154,7 @@ function Reports() {
   }
 
   function openStaffModal(row) {
-    const [start, end] = getDateRange(activeTab)
+    const [start, end] = getDateRange(activeTab, customDay)
     const items = getStaffItemBreakdown(row.name, start, end)
     setStaffModal({ name: row.name, orderCount: row.orderCount, revenue: row.revenue, items })
   }
@@ -141,7 +166,16 @@ function Reports() {
   }
 
   // 24 hourly bars / 31 daily bars would crowd the axis — skip labels
-  const xAxisInterval = activeTab === 'month' ? 4 : activeTab === 'today' ? 1 : 0
+  const xAxisInterval = activeTab === 'month' ? 4 : SINGLE_DAY_TABS.has(activeTab) ? 1 : 0
+
+  // Tek gün modlarında grafiğin altına saat aralığı yerine günün kendisini
+  // yaz — "dün mü bugün mü bakıyorum" sorusu tek bakışta cevaplansın.
+  const [rangeStart] = getDateRange(activeTab, customDay)
+  const singleDayLabel = SINGLE_DAY_TABS.has(activeTab) && rangeStart
+    ? new Date(`${rangeStart}T00:00:00`).toLocaleDateString('tr-TR', {
+        day: 'numeric', month: 'long', year: 'numeric', weekday: 'long',
+      })
+    : null
 
   return (
     <div className="page reports-page">
@@ -149,16 +183,36 @@ function Reports() {
       {/* ── Header ── */}
       <div className="rpt-header">
         <h1 className="rpt-title">Performans Analizi</h1>
-        <div className="rpt-tabs">
-          {TABS.map(t => (
-            <button
-              key={t.id}
-              className={`rpt-tab${activeTab === t.id ? ' rpt-tab--active' : ''}`}
-              onClick={() => setActiveTab(t.id)}
-            >
-              {t.label}
-            </button>
-          ))}
+        <div className="rpt-filters">
+          <div className="rpt-tabs">
+            {TABS.map(t => (
+              <button
+                key={t.id}
+                className={`rpt-tab${activeTab === t.id ? ' rpt-tab--active' : ''}`}
+                onClick={() => setActiveTab(t.id)}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Herhangi bir güne gitmek için tarih seçici. Bir gün seçmek
+              raporu o güne kilitler; sekmelerden birine basmak geri alır. */}
+          <label className={`rpt-daypick${activeTab === 'day' ? ' rpt-daypick--active' : ''}`}>
+            <span className="rpt-daypick__label">Gün</span>
+            <input
+              type="date"
+              className="rpt-daypick__input"
+              value={customDay}
+              max={toIso(new Date())}
+              onChange={e => {
+                const v = e.target.value
+                if (!v) return
+                setCustomDay(v)
+                setActiveTab('day')
+              }}
+            />
+          </label>
         </div>
       </div>
 
@@ -194,10 +248,8 @@ function Reports() {
           <div className="rpt-card">
             <div className="rpt-card__header">
               <span className="rpt-card__title">{tab.chartTitle}</span>
-              {activeTab === 'today' && periodData.length > 0 && (
-                <span className="rpt-card__sub">
-                  {periodData[0].label} – {periodData[periodData.length - 1].label}
-                </span>
+              {singleDayLabel && (
+                <span className="rpt-card__sub">{singleDayLabel}</span>
               )}
             </div>
             <div style={{ height: 220 }}>

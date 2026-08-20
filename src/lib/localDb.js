@@ -1703,14 +1703,16 @@ export function getTopProduct(startIso, endIso) {
   return { name, qty }
 }
 
-export function getRevenueByPeriod(mode) {
+export function getRevenueByPeriod(mode, isoDay = null) {
   requireDb()
   const pad = n => String(n).padStart(2, '0')
   const fmt = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`
   const now = new Date()
 
-  if (mode === 'today') {
-    const today = fmt(now)
+  // Tek gün modları — bugün, dün ve tarih seçiciyle gelen gün — aynı saatlik
+  // dökümü paylaşır; hangi gün olduğu isoDay ile bildirilir.
+  if (mode === 'today' || mode === 'yesterday' || mode === 'day') {
+    const today = isoDay ?? fmt(now)
     const res = db.exec(
       `SELECT CAST(strftime('%H', closed_at,'localtime') AS INTEGER) as h, COALESCE(SUM(total),0)
        FROM orders WHERE status='completed' AND date(closed_at,'localtime') = ?
