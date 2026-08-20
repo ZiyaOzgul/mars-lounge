@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useApp } from '../../context/AppContext.jsx'
 import {
-  saveCompletedOrder, getDailyRevenue, isDbInitialized,
+  saveCompletedOrder,
   ensurePersistedActiveOrder, getPaidItemIds, getOrderTotalPaid,
   setOrderStatus, consumeIngredients, moveOrderToTable, completeActiveOrder,
   getAllActiveOrders, deleteActiveOrderCascade,
@@ -41,12 +41,7 @@ function Tables() {
   const [qrQueue,        setQrQueue]        = useState([])
   const [profileOpen,    setProfileOpen]    = useState(false)
   const [tableFilter,    setTableFilter]    = useState('all') // 'all' | 'open'
-  const [dailyRevenue,   setDailyRevenue]   = useState(() => isDbInitialized() ? getDailyRevenue() : 0)
   const [lowStockAlerts, setLowStockAlerts] = useState([])
-
-  const refreshRevenue = useCallback(() => {
-    if (isDbInitialized()) setDailyRevenue(getDailyRevenue())
-  }, [])
 
   useEffect(() => {
     const timer = setInterval(() => { setClock(getLiveTime()); setNowTs(Date.now()) }, 1000)
@@ -505,7 +500,6 @@ function Tables() {
         } catch (e) {
           console.warn('[Tables] ghost active-order cleanup failed', e)
         }
-        refreshRevenue()
         if (lowStockWarnings?.length) setLowStockAlerts(lowStockWarnings)
         console.log(`[Tables] ✓ Order completed — Masa ${tableId} | ₺${transactionData.total?.toFixed(2)} | ${transactionData.paymentMethod}`)
         if (transactionData.supabaseOrderId && isSupabaseReady) {
@@ -736,7 +730,6 @@ function Tables() {
       })
       if (transactionData.isFullPayment && !scopeGroupLocalId) setSelectedTableId(null)
 
-      if (anyClosed) refreshRevenue()
       if (lowStock.length) setLowStockAlerts(lowStock)
       console.log(`[Tables] ✓ ${transactionData.isFullPayment ? 'Order closed' : 'Partial payment'} — Masa ${tableId} | ₺${transactionData.paymentRows?.reduce((s, r) => s + Number(r.amount), 0).toFixed(2)}`)
       // A group just closed — free the table remotely if nothing else is active there
@@ -839,10 +832,6 @@ function Tables() {
           </div>
 
           <div className="tables-header__right">
-            <div className="stats-chip">
-              <span className="stats-chip__label">CİRO</span>
-              <span className="stats-chip__value">₺{dailyRevenue.toLocaleString('tr-TR', { minimumFractionDigits: 2 })}</span>
-            </div>
             <div className="stats-chip">
               <span className="stats-chip__label">AKTİF</span>
               <span className="stats-chip__value">{aktif}</span>

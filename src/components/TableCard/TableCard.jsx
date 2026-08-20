@@ -17,12 +17,39 @@ function ClockIcon({ color }) {
   )
 }
 
+// "Masa-12" → { prefix: "Masa-", number: "12" }. Tire yoksa tamamı numara sayılır.
+function splitName(name) {
+  const i = name.indexOf('-')
+  return i !== -1
+    ? { prefix: name.slice(0, i + 1), number: name.slice(i + 1) }
+    : { prefix: '', number: name }
+}
+
+// Kart zemininde duran soluk marka filigranı: logo + masa numarası, ikisi de
+// aynı renk ve saydamlıkta. Salt dekoratif — aria-hidden ve pointer-events:none,
+// yani ekran okuyucuya ve tıklamaya karışmaz.
+function Watermark({ number }) {
+  return (
+    <div className="table-card__watermark" aria-hidden="true">
+      <img
+        src="./mars-lounge-logo.png"
+        alt=""
+        draggable="false"
+        className="table-card__watermark-logo"
+      />
+      <span className="table-card__watermark-no">{number}</span>
+    </div>
+  )
+}
+
 function TableCard({ table, isSelected, onClick }) {
   const { name, status, type, openMinutes, itemCount, total, idleMinutes } = table
+  const { prefix, number } = splitName(name)
 
   if (status === 'empty') {
     return (
       <div className="table-card table-card--empty" onClick={onClick}>
+        <Watermark number={number} />
         <div className="table-card__top-row">
           <span className="table-card__name-empty">{name}</span>
           <span className="badge badge--muted">BOŞ</span>
@@ -49,16 +76,13 @@ function TableCard({ table, isSelected, onClick }) {
     : type === 'alert' ? 'var(--color-danger)'
     : 'var(--color-accent)'
 
-  // Split name into prefix "T-" and number "04"
-  const dashIdx = name.indexOf('-')
-  const prefix = dashIdx !== -1 ? name.slice(0, dashIdx + 1) : ''
-  const number = dashIdx !== -1 ? name.slice(dashIdx + 1) : name
-
   return (
     <div
       className={`table-card ${cardClass} ${idleClass} ${isSelected ? 'table-card--selected' : ''}`}
       onClick={onClick}
     >
+      <Watermark number={number} />
+
       {/* Top badge row */}
       <div className="table-card__top-row">
         <div className="table-card__badges-left">

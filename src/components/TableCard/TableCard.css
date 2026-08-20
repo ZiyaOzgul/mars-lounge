@@ -9,6 +9,57 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+/* ── Marka filigranı ── */
+/* Logo + masa numarası tek blok halinde kartın merkezinde. Saydamlık
+   kapsayıcıya veriliyor ki iki öge de birebir aynı tonda kalsın. */
+.table-card__watermark {
+  position: absolute;
+  /* Kartın tam ortası: sol/üst %50, sonra kendi boyutunun yarısı kadar geri al */
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  opacity: 0.18;
+  z-index: -1;
+  pointer-events: none;
+  user-select: none;
+  white-space: nowrap;
+  /* Grid en dar sütununda (180px) blok kartı aşmasın */
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.table-card__watermark-logo {
+  width: 88px;
+  height: 88px;
+  /* Kare kaynak görseli tam daireye kırp: cover, contain'in bırakacağı
+     boşluğu önler, %50 yarıçap da kalanı çembere oturtur. */
+  object-fit: cover;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.table-card__watermark-no {
+  font-size: 50px;
+  font-weight: 800;
+  line-height: 1;
+  /* Logonun altın/kum tonuna en yakın marka rengi */
+  color: var(--color-accent);
+}
+
+/* Zemini koyu olan kartlarda filigran biraz daha silik dursun */
+.table-card--qr .table-card__watermark,
+.table-card--alert .table-card__watermark,
+.table-card--idle-warn .table-card__watermark,
+.table-card--idle-alert .table-card__watermark {
+  opacity: 0.14;
 }
 
 .table-card:hover {
@@ -97,12 +148,14 @@
 }
 
 .table-card__prefix {
+  text-transform: uppercase;
   font-size: 14px;
   font-weight: 600;
   color: var(--color-text-secondary);
 }
 
 .table-card__number {
+  text-transform: uppercase;
   font-size: 32px;
   font-weight: 800;
   color: var(--color-text-primary);
@@ -111,6 +164,7 @@
 
 /* Empty card name */
 .table-card__name-empty {
+  text-transform: uppercase;
   font-size: 20px;
   font-weight: 700;
   color: var(--color-text-muted);
