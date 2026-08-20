@@ -1,7 +1,7 @@
 {
   "name": "mars-lounge-cafe",
   "private": true,
-  "version": "1.1.1",
+  "version": "1.1.2",
   "main": "electron/main.js",
   "scripts": {
     "dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
