@@ -404,3 +404,25 @@
   gap: 16px;
 }
 
+
+/* ── Masaları yenile ── */
+.tables-refresh svg {
+  transition: transform 0.2s ease;
+}
+
+.tables-refresh:hover:not(:disabled) svg {
+  transform: rotate(45deg);
+}
+
+.tables-refresh--busy {
+  cursor: progress;
+  color: var(--color-accent);
+}
+
+.tables-refresh--busy svg {
+  animation: tables-refresh-spin 0.8s linear infinite;
+}
+
+@keyframes tables-refresh-spin {
+  to { transform: rotate(360deg); }
+}

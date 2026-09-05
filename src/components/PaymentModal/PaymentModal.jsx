@@ -14,9 +14,10 @@ const MODES = [
 ]
 
 const METHODS = [
-  { id: 'cash', label: 'Nakit' },
-  { id: 'card', label: 'Kart' },
-  { id: 'iban', label: 'IBAN' },
+  { id: 'cash',     label: 'Nakit' },
+  { id: 'card',     label: 'Kart' },
+  { id: 'iban',     label: 'IBAN' },
+  { id: 'veresiye', label: 'Veresiye' },
 ]
 
 const NUMPAD_KEYS = ['1','2','3','4','5','6','7','8','9','C','0','⌫']
@@ -32,6 +33,13 @@ function MethodIcon({ id }) {
   if (id === 'card') return (
     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
       <rect x="1" y="4" width="22" height="16" rx="2" ry="2"/><line x1="1" y1="10" x2="23" y2="10"/>
+    </svg>
+  )
+  if (id === 'veresiye') return (
+    // Defter — borcun yazildigi yer
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+      <path d="M9 7h7M9 11h5" />
     </svg>
   )
   // iban — bank / transfer
@@ -127,6 +135,9 @@ function PaymentModal({ table, partialOrder, alreadyPaid = 0, onClose, onComplet
   // selection+method groups so a single transaction can mix methods.
   const [itemSel,    setItemSel]    = useState(new Map())
   const [itemMethod, setItemMethod] = useState('cash')
+  // Veresiye borclunun adi. payments.payer_label'a yazilir; veresiye defteri
+  // ve raporlar kisileri bu alana gore grupluyor.
+  const [veresiyeName, setVeresiyeName] = useState('')
   const [itemParts,  setItemParts]  = useState([])
 
   // Display-only grouping of identical unpaid items (same helper OrderPanel
@@ -283,14 +294,25 @@ function PaymentModal({ table, partialOrder, alreadyPaid = 0, onClose, onComplet
     }
     return []
   }
-  const paymentsToCommit = computePaymentsToCommit()
+  // Veresiye satirlarinda payer_label MUTLAKA borclunun adi olmali — defter
+  // ve rapor bu alana gore grupluyor. Diger yontemlerde etiket ne ise kalir.
+  const trimmedVeresiyeName = veresiyeName.trim()
+  const paymentsToCommit = computePaymentsToCommit().map(r =>
+    r.payment_method === 'veresiye'
+      ? { ...r, payer_label: trimmedVeresiyeName.slice(0, 200) || null }
+      : r
+  )
+  const hasVeresiye = paymentsToCommit.some(r => r.payment_method === 'veresiye')
+  const veresiyeTotal = paymentsToCommit
+    .filter(r => r.payment_method === 'veresiye')
+    .reduce((sum, r) => sum + r.amount, 0)
 
   const commitAmount = paymentsToCommit.reduce((s, r) => s + r.amount, 0)
   const commitOverflow = commitAmount > total + 0.001
   const isFullPayment = commitAmount + 0.001 >= total
   const canComplete = !commitOverflow && commitAmount > 0 && (
     selectionActive || mode !== 'single' || singleMethod !== 'cash' || enteredAmount >= payableTotal
-  )
+  ) && (!hasVeresiye || trimmedVeresiyeName.length > 0)
 
   // ── Handlers ───────────────────────────────────────────────────
   const handleNumpad = (key) => {
@@ -903,6 +925,34 @@ function PaymentModal({ table, partialOrder, alreadyPaid = 0, onClose, onComplet
                 <MethodPicker value={draftMethod} onChange={setDraftMethod} />
 
                 <button className="pm-add-draft-btn" onClick={addDraft}>+ Ödemeye Ekle</button>
+              </div>
+            )}
+
+            {/* Veresiye: borclunun adi zorunlu */}
+            {hasVeresiye && (
+              <div className="pm-veresiye">
+                <div className="pm-veresiye__head">
+                  <span className="pm-veresiye__title">Veresiye</span>
+                  <strong className="pm-veresiye__amount">{fmt(veresiyeTotal)}</strong>
+                </div>
+                <label className="pm-veresiye__label" htmlFor="pm-veresiye-name">
+                  Kime veresiye veriliyor?
+                </label>
+                <input
+                  id="pm-veresiye-name"
+                  className="pm-veresiye__input"
+                  type="text"
+                  value={veresiyeName}
+                  onChange={e => setVeresiyeName(e.target.value)}
+                  placeholder="Örn. Ahmet Yılmaz"
+                  maxLength={80}
+                  autoComplete="off"
+                />
+                {!trimmedVeresiyeName && (
+                  <span className="pm-veresiye__warn">
+                    Tahsil edebilmek için isim girilmesi gerekiyor.
+                  </span>
+                )}
               </div>
             )}
 

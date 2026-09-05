@@ -1,8 +1,14 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useApp } from "../../context/AppContext.jsx";
 import useOnlineStatus from "../../hooks/useOnlineStatus.js";
 import ConfirmModal from "../../components/ConfirmModal/ConfirmModal.jsx";
 import { imageSrc } from "../../lib/imageSrc.js";
+import {
+  getVeresiyeByPerson,
+  getVeresiyeLedger,
+  settleVeresiye,
+  unsettleVeresiye,
+} from "../../lib/localDb.js";
 import "./Settings.css";
 
 // ── Icons ────────────────────────────────────────────────────────
@@ -324,10 +330,20 @@ const IconWifi = () => (
   </svg>
 );
 
+const IconLedger = () => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+       strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+    <path d="M9 7h7M9 11h5" />
+  </svg>
+);
+
 const SUB_NAV = [
   { id: "cafe", label: "Cafe Bilgileri", Icon: IconBriefcase },
   { id: "tables", label: "Masa Yönetimi", Icon: IconGrid },
   { id: "categories", label: "Menü Kategorileri", Icon: IconTag },
+  { id: "veresiye", label: "Veresiye Defteri", Icon: IconLedger },
   { id: "connection", label: "Bağlantı Durumu", Icon: IconWifi },
   { id: "system", label: "Sistem", Icon: IconGear },
 ];
@@ -784,6 +800,41 @@ function Settings() {
   const { isOnline } = useOnlineStatus();
 
   const [activeSection, setActiveSection] = useState("cafe");
+
+  // ── Veresiye defteri ──
+  const [veresiyePeople, setVeresiyePeople] = useState([]);
+  const [veresiyeRows, setVeresiyeRows] = useState([]);
+  const [veresiyeShowSettled, setVeresiyeShowSettled] = useState(false);
+  const [veresiyeExpanded, setVeresiyeExpanded] = useState(null);
+
+  const reloadVeresiye = useCallback((showSettled) => {
+    try {
+      setVeresiyePeople(getVeresiyeByPerson());
+      setVeresiyeRows(getVeresiyeLedger({ onlyOpen: !showSettled }));
+    } catch (e) {
+      console.warn("[Settings] veresiye defteri okunamadı", e);
+    }
+  }, []);
+
+  useEffect(() => {
+    reloadVeresiye(veresiyeShowSettled);
+  }, [reloadVeresiye, veresiyeShowSettled]);
+
+  const handleSettle = async (paymentId, method) => {
+    await settleVeresiye(paymentId, method);
+    reloadVeresiye(veresiyeShowSettled);
+  };
+
+  const handleUnsettle = async (paymentId) => {
+    await unsettleVeresiye(paymentId);
+    reloadVeresiye(veresiyeShowSettled);
+  };
+
+  const veresiyeOpenTotal = veresiyePeople.reduce((sum, p) => sum + Number(p.total || 0), 0);
+  const fmtTL = (n) =>
+    "₺" + Number(n || 0).toLocaleString("tr-TR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const fmtDate = (iso) =>
+    iso ? new Date(iso).toLocaleString("tr-TR", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "—";
   const [autoEditTableId, setAutoEditTableId] = useState(null);
   const [autoEditCatId, setAutoEditCatId] = useState(null);
   const [tableError, setTableError] = useState(null);
@@ -796,6 +847,7 @@ function Settings() {
     cafe: useRef(null),
     tables: useRef(null),
     categories: useRef(null),
+    veresiye: useRef(null),
     connection: useRef(null),
     system: useRef(null),
   };
@@ -1192,6 +1244,108 @@ function Settings() {
             />
 
             {/* ── 4. Bağlantı Durumu ── */}
+            {/* ── Veresiye Defteri ── */}
+            <div ref={sectionRefs.veresiye} className="settings-card">
+              <h2 className="settings-card__title">
+                <span className="settings-card__title-icon">
+                  <IconLedger />
+                </span>
+                Veresiye Defteri
+              </h2>
+
+              <div className="vd-summary">
+                <div className="vd-summary__main">
+                  <span className="vd-summary__label">Toplam açık borç</span>
+                  <strong className="vd-summary__value">{fmtTL(veresiyeOpenTotal)}</strong>
+                </div>
+                <span className="vd-summary__count">
+                  {veresiyePeople.length} kişi
+                </span>
+              </div>
+
+              {veresiyePeople.length > 0 && (
+                <div className="vd-people">
+                  {veresiyePeople.map((p) => (
+                    <button
+                      key={p.name}
+                      className={`vd-person${veresiyeExpanded === p.name ? " vd-person--active" : ""}`}
+                      onClick={() =>
+                        setVeresiyeExpanded(veresiyeExpanded === p.name ? null : p.name)
+                      }
+                    >
+                      <span className="vd-person__name">{p.name}</span>
+                      <span className="vd-person__meta">{p.count} kayıt</span>
+                      <strong className="vd-person__total">{fmtTL(p.total)}</strong>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              <label className="vd-filter">
+                <input
+                  type="checkbox"
+                  checked={veresiyeShowSettled}
+                  onChange={(e) => setVeresiyeShowSettled(e.target.checked)}
+                />
+                <span>Tahsil edilenleri de göster</span>
+              </label>
+
+              {veresiyeRows.length === 0 ? (
+                <p className="vd-empty">
+                  {veresiyeShowSettled
+                    ? "Henüz veresiye kaydı yok."
+                    : "Açık veresiye borcu yok."}
+                </p>
+              ) : (
+                <div className="vd-rows">
+                  {veresiyeRows
+                    .filter((r) => !veresiyeExpanded || r.name === veresiyeExpanded)
+                    .map((r) => (
+                      <div
+                        key={r.id}
+                        className={`vd-row${r.settledAt ? " vd-row--settled" : ""}`}
+                      >
+                        <div className="vd-row__info">
+                          <span className="vd-row__name">{r.name}</span>
+                          <span className="vd-row__meta">
+                            {fmtDate(r.createdAt)}
+                            {r.tableName ? ` · ${r.tableName}` : ""}
+                          </span>
+                        </div>
+                        <strong className="vd-row__amount">{fmtTL(r.amount)}</strong>
+                        {r.settledAt ? (
+                          <div className="vd-row__actions">
+                            <span className="vd-row__paid">
+                              Ödendi · {fmtDate(r.settledAt)}
+                            </span>
+                            <button
+                              className="vd-undo"
+                              onClick={() => handleUnsettle(r.id)}
+                              title="Tahsilatı geri al"
+                            >
+                              Geri al
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="vd-row__actions">
+                            <span className="vd-row__hint">Tahsil et:</span>
+                            <button className="vd-settle" onClick={() => handleSettle(r.id, "cash")}>
+                              Nakit
+                            </button>
+                            <button className="vd-settle" onClick={() => handleSettle(r.id, "card")}>
+                              Kart
+                            </button>
+                            <button className="vd-settle" onClick={() => handleSettle(r.id, "iban")}>
+                              IBAN
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                </div>
+              )}
+            </div>
+
             <div ref={sectionRefs.connection} className="settings-card">
               <h2 className="settings-card__title">
                 <span className="settings-card__title-icon">

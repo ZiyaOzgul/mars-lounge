@@ -6,7 +6,7 @@ import {
 } from 'recharts'
 import {
   getReportKpis, getTopProduct, getRevenueByPeriod,
-  getPaymentBreakdown, getPaymentMethodDetail, getTableRevenue, getTopProducts, getProductSalesDetail,
+  getPaymentBreakdown, getPaymentMethodDetail, getVeresiyeSummary, getTableRevenue, getTopProducts, getProductSalesDetail,
   getTableProductBreakdown, getProductTableBreakdown,
   getCategoryRevenue, getIngredientConsumption,
   getOrdersList, getOrderItems,
@@ -22,7 +22,7 @@ const TABS = [
   { id: 'total', label: 'Toplam',   revenueLabel: 'Toplam Ciro',   orderLabel: 'Toplam Sipariş',   chartTitle: 'Aylık Ciro' },
 ]
 
-const PIE_COLORS = ['#e8975a', '#6366f1', '#0d9488']
+const PIE_COLORS = ['#e8975a', '#6366f1', '#0d9488', '#f59e0b']
 
 // Tarih seçiciyle seçilen gün sekme çubuğunda görünmez, ama başlık ve KPI
 // etiketleri TABS kayıtlarından okunduğu için aynı şekle sahip bir karşılığı olmalı.
@@ -92,7 +92,11 @@ function Reports() {
   const [kpis,         setKpis]         = useState({ revenue: 0, orderCount: 0, avgOrder: 0 })
   const [topProduct,   setTopProduct]   = useState({ name: '—', qty: 0 })
   const [periodData,   setPeriodData]   = useState([])
-  const [paymentData,  setPaymentData]  = useState([{ name: 'Nakit', value: 0 }, { name: 'Kart', value: 0 }, { name: 'IBAN', value: 0 }])
+  const [paymentData,  setPaymentData]  = useState([{ name: 'Nakit', value: 0 }, { name: 'Kart', value: 0 }, { name: 'IBAN', value: 0 }, { name: 'Veresiye', value: 0 }])
+  const [veresiye,     setVeresiye]     = useState({ periodTotal: 0, openTotal: 0 })
+  // Veresiye parasi henuz kasaya girmedigi icin varsayilan olarak cirodan
+  // dusuluyor. Kapatinca satis anindaki ciro gorunur.
+  const [veresiyeExcluded, setVeresiyeExcluded] = useState(true)
   const [paymentDetail, setPaymentDetail] = useState({ discount: 0, points: 0, netRevenue: 0, grossRevenue: 0 })
   const [tableRevData, setTableRevData] = useState([])
   const [topProducts,  setTopProducts]  = useState([])
@@ -116,6 +120,7 @@ function Reports() {
     setPeriodData(getRevenueByPeriod(activeTab, start))
     setPaymentData(getPaymentBreakdown(start, end))
     setPaymentDetail(getPaymentMethodDetail(start, end))
+    setVeresiye(getVeresiyeSummary(start, end))
     setTableRevData(getTableRevenue(start, end))
     setTopProducts(getTopProducts(start, end))
     setDetailData(getProductSalesDetail(start, end))
@@ -380,6 +385,19 @@ function Reports() {
                   <span>{fmtCurrency(paymentDetail.points)}</span>
                 </div>
               )}
+              {veresiye.periodTotal > 0 && (
+                <div className="rpt-pay-detail__row rpt-pay-detail__row--veresiye">
+                  <span>
+                    Veresiye verilen
+                    {veresiye.openTotal > 0 && veresiye.openTotal !== veresiye.periodTotal && (
+                      <em className="rpt-pay-detail__hint">
+                        {fmtCurrency(veresiye.openTotal)} hâlâ açık
+                      </em>
+                    )}
+                  </span>
+                  <span>{fmtCurrency(veresiye.periodTotal)}</span>
+                </div>
+              )}
               <div className="rpt-pay-detail__row rpt-pay-detail__row--discount">
                 <span>Toplam İndirim</span>
                 <span>– {fmtCurrency(paymentDetail.discount)}</span>
@@ -387,12 +405,34 @@ function Reports() {
               <div className="rpt-pay-detail__divider" />
               <div className="rpt-pay-detail__row">
                 <span>Ciro (indirimsiz / brüt)</span>
-                <span>{fmtCurrency(paymentDetail.grossRevenue)}</span>
+                <span>
+                  {fmtCurrency(paymentDetail.grossRevenue - (veresiyeExcluded ? veresiye.periodTotal : 0))}
+                </span>
               </div>
               <div className="rpt-pay-detail__row rpt-pay-detail__row--net">
                 <span>Ciro (indirimli / net)</span>
-                <span>{fmtCurrency(paymentDetail.netRevenue)}</span>
+                <span>
+                  {fmtCurrency(paymentDetail.netRevenue - (veresiyeExcluded ? veresiye.periodTotal : 0))}
+                </span>
               </div>
+
+              {veresiye.periodTotal > 0 && (
+                <label className="rpt-veresiye-toggle">
+                  <input
+                    type="checkbox"
+                    checked={veresiyeExcluded}
+                    onChange={e => setVeresiyeExcluded(e.target.checked)}
+                  />
+                  <span>
+                    Veresiyeyi cirodan düş
+                    <em>
+                      {veresiyeExcluded
+                        ? 'Yalnızca kasaya giren para sayılıyor.'
+                        : 'Veresiye satışlar da ciroya dahil.'}
+                    </em>
+                  </span>
+                </label>
+              )}
             </div>
           </div>
 

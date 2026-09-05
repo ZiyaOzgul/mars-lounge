@@ -159,6 +159,8 @@ CREATE TABLE IF NOT EXISTS public.orders (
   payment_method        text,
   total                 numeric(10,2) DEFAULT 0,
   is_synced             boolean DEFAULT false,
+  -- Bolunmus odemede veresiye payi (cash/card/iban ile ayni mantik)
+  veresiye_amount       numeric(10,2),
   -- DEFAULT now() şart: QR/web menüsü insert'te created_at göndermiyor ve
   -- varsayılan olmadan satır NULL kalıyor (masa açılış süresi, sıralama ve
   -- tarih filtreleri bozuluyor).
@@ -214,9 +216,17 @@ CREATE TABLE IF NOT EXISTS public.payments (
   created_at      timestamp with time zone NOT NULL DEFAULT now(),
   local_id        text NOT NULL UNIQUE,
   is_synced       boolean DEFAULT true,
+  -- Veresiye tahsilatı: settled_at null ise borç hâlâ açık.
+  settled_at      timestamp with time zone,
+  settled_method  text,
   CONSTRAINT payments_amount_check CHECK ((amount > (0)::numeric)),
-  CONSTRAINT payments_payment_method_check CHECK ((payment_method = ANY (ARRAY['cash'::text, 'card'::text, 'iban'::text, 'points'::text])))
+  CONSTRAINT payments_payment_method_check CHECK ((payment_method = ANY (ARRAY['cash'::text, 'card'::text, 'iban'::text, 'points'::text, 'veresiye'::text]))),
+  CONSTRAINT payments_settled_method_check CHECK ((settled_method IS NULL OR settled_method = ANY (ARRAY['cash'::text, 'card'::text, 'iban'::text])))
 );
+
+CREATE INDEX IF NOT EXISTS idx_payments_veresiye_open
+  ON public.payments (created_at)
+  WHERE payment_method = 'veresiye' AND settled_at IS NULL;
 
 COMMENT ON COLUMN public.payments.payer_label IS 'Optional human label, e.g. "Müşteri 1" or "Ali".';
 COMMENT ON COLUMN public.payments.device IS 'Origin of the payment event (mobile, desktop, etc.).';

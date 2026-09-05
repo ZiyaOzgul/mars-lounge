@@ -258,6 +258,12 @@ export async function initDb() {
     `ALTER TABLE orders ADD COLUMN cash_amount REAL`,
     `ALTER TABLE orders ADD COLUMN card_amount REAL`,
     `ALTER TABLE orders ADD COLUMN iban_amount REAL`,
+    // Veresiye (müşteri borcu) — diğer yöntemlerle aynı şekilde tutulur.
+    // settled_at null ise borç hâlâ açık; settled_method borcun hangi yolla
+    // kapatıldığını söyler (cash/card/iban).
+    `ALTER TABLE orders ADD COLUMN veresiye_amount REAL`,
+    `ALTER TABLE payments ADD COLUMN settled_at TEXT`,
+    `ALTER TABLE payments ADD COLUMN settled_method TEXT`,
     `ALTER TABLE orders ADD COLUMN remote_id   TEXT`,
     `ALTER TABLE order_items ADD COLUMN variant_id INTEGER`,
     `ALTER TABLE ingredients ADD COLUMN container_name TEXT`,
@@ -1035,10 +1041,12 @@ export async function saveCompletedOrder(txData) {
   let cashAmt = sumMethod('cash')
   let cardAmt = sumMethod('card')
   let ibanAmt = sumMethod('iban')
+  let veresiyeAmt = sumMethod('veresiye')
   if (!payRows.length) {
-    cashAmt = txData.paymentMethod === 'cash' ? txData.total : 0
-    cardAmt = txData.paymentMethod === 'card' ? txData.total : 0
-    ibanAmt = txData.paymentMethod === 'iban' ? txData.total : 0
+    cashAmt     = txData.paymentMethod === 'cash'     ? txData.total : 0
+    cardAmt     = txData.paymentMethod === 'card'     ? txData.total : 0
+    ibanAmt     = txData.paymentMethod === 'iban'     ? txData.total : 0
+    veresiyeAmt = txData.paymentMethod === 'veresiye' ? txData.total : 0
   }
 
   // If this was a QR order already in Supabase, mark as pre-synced to avoid duplicate
@@ -1048,8 +1056,8 @@ export async function saveCompletedOrder(txData) {
   db.run(
     `INSERT INTO orders
        (id, local_id, table_id, table_name, status, payment_method,
-        subtotal, tax, discount, total, cash_amount, card_amount, iban_amount, is_synced, remote_id, created_at, closed_at, waiter_name)
-     VALUES (?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        subtotal, tax, discount, total, cash_amount, card_amount, iban_amount, veresiye_amount, is_synced, remote_id, created_at, closed_at, waiter_name)
+     VALUES (?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       orderId,
       localId,
@@ -1063,6 +1071,7 @@ export async function saveCompletedOrder(txData) {
       cashAmt > 0 ? cashAmt : null,
       cardAmt > 0 ? cardAmt : null,
       ibanAmt > 0 ? ibanAmt : null,
+      veresiyeAmt > 0 ? veresiyeAmt : null,
       isSynced,
       remoteId,
       now,
@@ -1795,16 +1804,103 @@ export function getPaymentBreakdown(startIso, endIso) {
                          ELSE 0 END), 0) as kart,
        COALESCE(SUM(CASE WHEN payment_method='iban'  THEN total
                          WHEN payment_method='split' THEN COALESCE(iban_amount,0)
-                         ELSE 0 END), 0) as iban
+                         ELSE 0 END), 0) as iban,
+       COALESCE(SUM(CASE WHEN payment_method='veresiye' THEN total
+                         WHEN payment_method='split'    THEN COALESCE(veresiye_amount,0)
+                         ELSE 0 END), 0) as veresiye
      FROM orders WHERE status='completed' ${clause}`,
     params
   )
-  const [nakit, kart, iban] = res[0]?.values[0] ?? [0, 0, 0]
+  const [nakit, kart, iban, veresiye] = res[0]?.values[0] ?? [0, 0, 0, 0]
   return [
-    { name: 'Nakit', value: nakit },
-    { name: 'Kart',  value: kart },
-    { name: 'IBAN',  value: iban },
+    { name: 'Nakit',    value: nakit },
+    { name: 'Kart',     value: kart },
+    { name: 'IBAN',     value: iban },
+    { name: 'Veresiye', value: veresiye },
   ]
+}
+
+// ── Veresiye (müşteri borcu) ──────────────────────────────────────
+// Veresiye normal bir ödeme satırı olarak yazılır (masa kapanır), ama parası
+// henüz alınmamıştır. Borçlunun adı payer_label'da tutulur; settled_at null
+// olduğu sürece borç açıktır.
+
+// Rapor için dönem özeti. periodTotal = bu dönemde verilen veresiye,
+// openTotal = bu dönemde verilenlerden hâlâ tahsil edilmemiş olanlar.
+export function getVeresiyeSummary(startIso, endIso) {
+  requireDb()
+  const { clause, params } = _dateClause(startIso, endIso)
+  const res = db.exec(
+    `SELECT COALESCE(SUM(p.amount),0),
+            COALESCE(SUM(CASE WHEN p.settled_at IS NULL THEN p.amount ELSE 0 END),0)
+     FROM payments p JOIN orders o ON o.id = p.order_id
+     WHERE o.status='completed' AND p.payment_method='veresiye' ${clause}`,
+    params
+  )
+  const [periodTotal, openTotal] = res[0]?.values[0] ?? [0, 0]
+  return { periodTotal, openTotal }
+}
+
+// Defter: kişi bazında toplanmış borçlar. onlyOpen=true ise yalnızca açık
+// olanlar. Tarih aralığı vermeden çağrılırsa tüm zamanları kapsar — defterin
+// amacı "kim ne kadar borçlu" olduğu, dönemsel rapor değil.
+export function getVeresiyeLedger({ onlyOpen = true } = {}) {
+  requireDb()
+  const res = db.exec(
+    `SELECT p.id, p.local_id, COALESCE(NULLIF(TRIM(p.payer_label),''),'(isimsiz)'),
+            p.amount, p.created_at, p.settled_at, p.settled_method,
+            o.table_name, o.id
+     FROM payments p JOIN orders o ON o.id = p.order_id
+     WHERE p.payment_method='veresiye' ${onlyOpen ? 'AND p.settled_at IS NULL' : ''}
+     ORDER BY p.created_at DESC`
+  )
+  if (!res.length) return []
+  return res[0].values.map(([id, localId, name, amount, createdAt, settledAt, settledMethod, tableName, orderId]) => ({
+    id, localId, name, amount, createdAt,
+    settledAt: settledAt || null,
+    settledMethod: settledMethod || null,
+    tableName: tableName || '',
+    orderId,
+  }))
+}
+
+// Kişi bazında toplam açık borç — defter ekranının üst özeti.
+export function getVeresiyeByPerson() {
+  requireDb()
+  const res = db.exec(
+    `SELECT COALESCE(NULLIF(TRIM(payer_label),''),'(isimsiz)') AS kisi,
+            COALESCE(SUM(amount),0), COUNT(*), MAX(created_at)
+     FROM payments
+     WHERE payment_method='veresiye' AND settled_at IS NULL
+     GROUP BY kisi ORDER BY 2 DESC`
+  )
+  if (!res.length) return []
+  return res[0].values.map(([name, total, count, lastAt]) => ({ name, total, count, lastAt }))
+}
+
+export async function settleVeresiye(paymentId, method) {
+  requireDb()
+  if (!['cash', 'card', 'iban'].includes(method)) {
+    throw new Error('Geçersiz tahsilat yöntemi: ' + method)
+  }
+  // is_synced sıfırlanır ki tahsilat bir sonraki turda Supabase'e de gitsin.
+  db.run(
+    `UPDATE payments SET settled_at = ?, settled_method = ?, is_synced = 0
+     WHERE id = ? AND payment_method = 'veresiye'`,
+    [new Date().toISOString(), method, paymentId]
+  )
+  await persistDb()
+}
+
+// Yanlışlıkla "ödendi" işaretlenen bir borcu geri açar.
+export async function unsettleVeresiye(paymentId) {
+  requireDb()
+  db.run(
+    `UPDATE payments SET settled_at = NULL, settled_method = NULL, is_synced = 0
+     WHERE id = ? AND payment_method = 'veresiye'`,
+    [paymentId]
+  )
+  await persistDb()
 }
 
 // Discount + points + gross/net revenue for the Reports payment breakdown card.
@@ -2700,16 +2796,20 @@ export async function insertRemoteCompletedOrder({
   const localPayments = getOrderPayments(localOrderId)
   if (localPayments.length > 0) {
     const sumMethod = (pred) => localPayments.filter(pred).reduce((s, p) => s + Number(p.amount), 0)
-    const cash   = sumMethod(p => p.payment_method === 'cash')
-    const iban   = sumMethod(p => p.payment_method === 'iban')
-    const points = sumMethod(p => p.payment_method === 'points')
-    const card   = sumMethod(p => !['cash', 'iban', 'points'].includes(p.payment_method))
-    const used = [['cash', cash], ['card', card], ['iban', iban], ['points', points]].filter(([, v]) => v > 0)
+    const cash     = sumMethod(p => p.payment_method === 'cash')
+    const iban     = sumMethod(p => p.payment_method === 'iban')
+    const points   = sumMethod(p => p.payment_method === 'points')
+    const veresiye = sumMethod(p => p.payment_method === 'veresiye')
+    // card, "geri kalan her sey" demek — veresiye ayri tutulmazsa kart cirosuna
+    // yazilir ve rapor yaniltir.
+    const card     = sumMethod(p => !['cash', 'iban', 'points', 'veresiye'].includes(p.payment_method))
+    const used = [['cash', cash], ['card', card], ['iban', iban], ['points', points], ['veresiye', veresiye]].filter(([, v]) => v > 0)
     const method = used.length > 1 ? 'split' : (used[0]?.[0] ?? paymentMethod ?? 'card')
     db.run(
-      `UPDATE orders SET payment_method = ?, cash_amount = ?, card_amount = ?, iban_amount = ?
+      `UPDATE orders SET payment_method = ?, cash_amount = ?, card_amount = ?, iban_amount = ?, veresiye_amount = ?
        WHERE id = ?`,
-      [method, cash > 0 ? cash : null, card > 0 ? card : null, iban > 0 ? iban : null, localOrderId]
+      [method, cash > 0 ? cash : null, card > 0 ? card : null, iban > 0 ? iban : null,
+       veresiye > 0 ? veresiye : null, localOrderId]
     )
   }
 
@@ -2723,18 +2823,22 @@ export async function completeActiveOrder(orderId, { subtotal, tax, discount, cl
   requireDb()
   const payments = getOrderPayments(orderId)
   const sumMethod = (pred) => payments.filter(pred).reduce((s, p) => s + Number(p.amount), 0)
-  const cash   = sumMethod(p => p.payment_method === 'cash')
-  const iban   = sumMethod(p => p.payment_method === 'iban')
-  const points = sumMethod(p => p.payment_method === 'points')
-  const card   = sumMethod(p => !['cash', 'iban', 'points'].includes(p.payment_method))
-  const used = [['cash', cash], ['card', card], ['iban', iban], ['points', points]].filter(([, v]) => v > 0)
+  const cash     = sumMethod(p => p.payment_method === 'cash')
+  const iban     = sumMethod(p => p.payment_method === 'iban')
+  const points   = sumMethod(p => p.payment_method === 'points')
+  const veresiye = sumMethod(p => p.payment_method === 'veresiye')
+  // Bkz. yukarisi: veresiye ayri tutulmazsa kart cirosuna karisir.
+  const card     = sumMethod(p => !['cash', 'iban', 'points', 'veresiye'].includes(p.payment_method))
+  const used = [['cash', cash], ['card', card], ['iban', iban], ['points', points], ['veresiye', veresiye]].filter(([, v]) => v > 0)
   const method = used.length > 1 ? 'split' : (used[0]?.[0] ?? 'card')
   db.run(
     `UPDATE orders SET status = 'completed', payment_method = ?, subtotal = ?, tax = ?, discount = ?,
-            cash_amount = ?, card_amount = ?, iban_amount = ?, closed_at = ?, is_synced = 0
+            cash_amount = ?, card_amount = ?, iban_amount = ?, veresiye_amount = ?,
+            closed_at = ?, is_synced = 0
      WHERE id = ?`,
     [method, Number(subtotal) || 0, Number(tax) || 0, Number(discount) || 0,
      cash > 0 ? cash : null, card > 0 ? card : null, iban > 0 ? iban : null,
+     veresiye > 0 ? veresiye : null,
      closedAt || new Date().toISOString(), orderId]
   )
   await persistDb()
@@ -2856,7 +2960,8 @@ export function getUnsyncedPayments() {
   requireDb()
   const res = db.exec(
     `SELECT p.id, p.local_id, o.remote_id as order_remote_id,
-            p.amount, p.payment_method, p.payer_label, p.processed_by, p.device, p.created_at
+            p.amount, p.payment_method, p.payer_label, p.processed_by, p.device, p.created_at,
+            p.settled_at, p.settled_method
      FROM payments p
      JOIN orders o ON o.id = p.order_id
      WHERE p.is_synced = 0 AND o.remote_id IS NOT NULL`

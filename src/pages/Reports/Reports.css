@@ -683,3 +683,44 @@
 .rpt-daypick__input:focus {
   outline: none;
 }
+
+/* ── Veresiye ── */
+.rpt-pay-detail__row--veresiye span:last-child {
+  color: var(--color-warning);
+  font-weight: 700;
+}
+
+.rpt-pay-detail__hint {
+  display: block;
+  font-size: 11px;
+  font-style: normal;
+  color: var(--color-text-muted);
+  margin-top: 2px;
+}
+
+.rpt-veresiye-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--color-border);
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--color-text-primary);
+}
+
+.rpt-veresiye-toggle input {
+  margin-top: 2px;
+  accent-color: var(--color-accent);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.rpt-veresiye-toggle em {
+  display: block;
+  font-size: 11px;
+  font-style: normal;
+  color: var(--color-text-muted);
+  margin-top: 2px;
+}

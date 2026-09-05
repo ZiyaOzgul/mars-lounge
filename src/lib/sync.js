@@ -511,7 +511,7 @@ export async function syncToSupabase(log = null) {
 
   // ── Payments ──────────────────────────────────────────────────
   const payments = getUnsyncedPayments()
-  for (const [id, local_id, order_remote_id, amount, payment_method, payer_label, processed_by, device, created_at] of payments) {
+  for (const [id, local_id, order_remote_id, amount, payment_method, payer_label, processed_by, device, created_at, settled_at, settled_method] of payments) {
     if (!order_remote_id) continue
     const { data, error } = await supabase
       .from('payments')
@@ -520,7 +520,10 @@ export async function syncToSupabase(log = null) {
           payer_label: payer_label || null,
           processed_by: processed_by || null,
           device: device || 'desktop',
-          created_at: created_at || new Date().toISOString() },
+          created_at: created_at || new Date().toISOString(),
+          // Veresiye tahsilati: null ise borc hala acik
+          settled_at: settled_at || null,
+          settled_method: settled_method || null },
         { onConflict: 'local_id' }
       )
       .select('id')

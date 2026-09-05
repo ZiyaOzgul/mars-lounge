@@ -1226,3 +1226,60 @@
   padding: 8px 12px;
 }
 
+
+/* ── Veresiye: borçlunun adı ── */
+.pm-veresiye {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  background: var(--color-warning-light);
+  border: 1px solid var(--color-warning);
+  border-radius: var(--radius-input);
+}
+
+.pm-veresiye__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.pm-veresiye__title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.pm-veresiye__amount {
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--color-text-primary);
+}
+
+.pm-veresiye__label {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.pm-veresiye__input {
+  padding: 9px 11px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-input);
+  background: var(--color-bg-card);
+  font-family: var(--font-main);
+  font-size: 14px;
+  color: var(--color-text-primary);
+}
+
+.pm-veresiye__input:focus {
+  outline: none;
+  border-color: var(--color-accent);
+}
+
+.pm-veresiye__warn {
+  font-size: 11px;
+  color: var(--color-danger);
+}

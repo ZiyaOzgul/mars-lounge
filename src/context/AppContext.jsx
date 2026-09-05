@@ -408,6 +408,30 @@ export function AppProvider({ children }) {
     })
   }, [])
 
+  // Ekran durumunu yerel veritabanindan SIFIRDAN kurar (birlestirmez).
+  //
+  // mergeActiveOrdersIntoRuntime bilerek yalnizca ekleme yapiyor, hicbir seyi
+  // silmiyor. Bu yuzden yerelde artik var olmayan bir masa/siparis ekranda
+  // asili kalabiliyor ve ancak uygulama kapanip acilinca temizleniyordu —
+  // "sildigim sey geri geliyor, kapat-ac ile duzeliyor" sikayeti buradan
+  // geliyor. Bu fonksiyon ayni sifirdan kurulumu uygulamayi kapatmadan yapar.
+  const rebuildRuntimeFromDb = useCallback(() => {
+    if (!isDbInitialized()) return
+    let actives
+    try { actives = getAllActiveOrders() } catch { return }
+
+    const next = {}
+    for (const o of actives) {
+      const tid = String(o.table_id)
+      const { group, tableState } = hydrateGroupFromActiveOrder(o)
+      const base = next[tid] ?? tableState
+      group.label = `Sipariş ${(base.orders?.length ?? 0) + 1}`
+      next[tid] = { ...base, orders: [...(base.orders ?? []), group] }
+    }
+    // Tamamen degistir: DB'de olmayan masa ekranda da kalmaz.
+    setRuntimeStates(next)
+  }, [])
+
   const triggerSync = useCallback(async () => {
     if (isSyncingRef.current) {
       pendingResyncRef.current = true
@@ -1022,6 +1046,8 @@ export function AppProvider({ children }) {
       effectiveModifiersForProduct,
       // Sync
       isSyncing, lastSyncAt, unsyncedCount, triggerSync, refreshUnsyncedCount, isOnline,
+      // Ekran durumunu DB'den sifirdan kurar — Masalar sayfasindaki yenile butonu
+      rebuildRuntimeFromDb,
       // Reset
       resetAllData, resetOnlineData,
       // Reopen a closed order (correction / new order)

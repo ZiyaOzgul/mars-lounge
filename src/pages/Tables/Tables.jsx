@@ -35,7 +35,8 @@ function groupSubtotal(items) {
 }
 
 function Tables() {
-  const { tableDefs, triggerSync, isOnline, runtimeStates, setRuntimeStates, currentUser, logoutUser } = useApp()
+  const { tableDefs, triggerSync, isOnline, runtimeStates, setRuntimeStates, currentUser, logoutUser,
+          rebuildRuntimeFromDb } = useApp()
   const [clock,          setClock]          = useState(getLiveTime)
   const [nowTs,          setNowTs]          = useState(() => Date.now())
   const [selectedTableId, setSelectedTableId] = useState(null)
@@ -46,6 +47,7 @@ function Tables() {
   const [profileOpen,    setProfileOpen]    = useState(false)
   const [tableFilter,    setTableFilter]    = useState('all') // 'all' | 'open'
   const [lowStockAlerts, setLowStockAlerts] = useState([])
+  const [refreshing,     setRefreshing]     = useState(false)
 
   useEffect(() => {
     const timer = setInterval(() => { setClock(getLiveTime()); setNowTs(Date.now()) }, 1000)
@@ -55,6 +57,26 @@ function Tables() {
   // Payments/payment_items realtime moved to AppContext's always-on
   // 'desktop-orders-realtime' channel so payment updates propagate app-wide,
   // not just while this page is mounted.
+
+  // Ekrani yerel veritabanindan sifirdan kurar, sonra senkron turu calistirir.
+  // Amac: "sildigim siparis geri geliyor, ancak kapat-ac ile duzeliyor"
+  // durumunu uygulamayi kapatmadan cozmek. Once DB'den yeniden kurulur (ekranda
+  // asili kalmis kayitlar boylece temizlenir), ardindan senkron son durumu
+  // getirir ve merge yeniden calisir.
+  const handleRefresh = useCallback(async () => {
+    if (refreshing) return
+    setRefreshing(true)
+    try {
+      rebuildRuntimeFromDb()
+      setSelectedTableId(null)
+      if (isOnline) await triggerSync()
+    } catch (e) {
+      console.warn('[Tables] yenileme başarısız', e)
+    } finally {
+      // Kisa bir gecikme: is aninda bitse bile kullanici geri bildirimi gorsun
+      setTimeout(() => setRefreshing(false), 400)
+    }
+  }, [refreshing, rebuildRuntimeFromDb, isOnline, triggerSync])
 
   // ── Realtime QR order subscription ──────────────────────────────
   // Turns one pending order row into a queued approval card. Shared by the
@@ -883,6 +905,18 @@ function Tables() {
               <span className="stats-chip__label">BEKLEYEN</span>
               <span className="stats-chip__value">{bekleyen}</span>
             </div>
+            <button
+              className={`icon-btn tables-refresh${refreshing ? ' tables-refresh--busy' : ''}`}
+              onClick={handleRefresh}
+              disabled={refreshing}
+              title="Masaları yenile — ekranı veritabanından yeniden kurar"
+              aria-label="Masaları yenile"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 2v6h-6" /><path d="M3 12a9 9 0 0 1 15-6.7L21 8" />
+                <path d="M3 22v-6h6" /><path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
+              </svg>
+            </button>
             <div className="stats-clock">
               <span className="stats-clock__label">CANLI SAAT</span>
               <span className="stats-clock__time">{clock}</span>
