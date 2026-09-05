@@ -317,46 +317,43 @@ function Tables() {
     })
   }
 
-  // Move the whole order group from one table to another (empty) table.
-  const handleMoveOrderToTable = (fromTableId, subOrderLocalId, toTableId) => {
-    // Keep the materialized order (if any) pointing at the new table
-    const movingGroup = (runtimeStates[fromTableId]?.orders ?? []).find(o => o.localId === subOrderLocalId)
-    if (movingGroup?.persistedOrderId) {
-      const toName = tableDefs.find(t => t.id === toTableId)?.name ?? ''
-      moveOrderToTable(movingGroup.persistedOrderId, toTableId, toName)
-        .catch(e => console.warn('[Tables] persisted order move failed', e))
-    }
-    setRuntimeStates(prev => {
-      const fromState = prev[fromTableId]
-      if (!fromState) return prev
-      const group = (fromState.orders ?? []).find(o => o.localId === subOrderLocalId)
-      if (!group) return prev
-      const remainingOrders = (fromState.orders ?? []).filter(o => o.localId !== subOrderLocalId)
-      const next = { ...prev }
-      if (remainingOrders.length === 0) delete next[fromTableId]
-      else next[fromTableId] = { ...fromState, orders: remainingOrders }
+  // Masanin TAMAMINI baska bir (bos) masaya tasir: butun siparis gruplari,
+  // kalicilastirilmis olanlar dahil. Urun bazli tasima ayri bir akis
+  // (handleMoveItemsToTable) ve bundan etkilenmiyor.
+  const handleMoveWholeTable = (fromTableId, toTableId) => {
+    const fromState = runtimeStates[fromTableId]
+    const groups = fromState?.orders ?? []
+    if (!groups.length) return
 
-      const toState = prev[toTableId]
-      if (!toState) {
-        next[toTableId] = {
-          status: 'occupied',
-          type: 'normal',
-          openTime: getLiveTime(),
-          openedAt: new Date().toISOString(),
-          openMinutes: 0,
-          waiter: '—',
-          orders: [group],
-        }
-      } else {
-        next[toTableId] = {
-          ...toState,
-          status: 'occupied',
-          orders: [...(toState.orders ?? []), group],
-        }
-      }
+    const toName = tableDefs.find(t => t.id === toTableId)?.name ?? ''
+    for (const g of groups) {
+      if (!g.persistedOrderId) continue
+      moveOrderToTable(g.persistedOrderId, toTableId, toName)
+        .catch(e => console.warn('[Tables] masa taşıma — kalıcı sipariş taşınamadı', e))
+    }
+
+    setRuntimeStates(prev => {
+      const from = prev[fromTableId]
+      if (!from) return prev
+      const moving = from.orders ?? []
+      if (!moving.length) return prev
+
+      const next = { ...prev }
+      delete next[fromTableId]
+
+      const to = prev[toTableId]
+      // Hedef masa doluysa gruplar mevcutlarin arkasina eklenir; bos ise
+      // kaynagin acilis saati korunur ki "ne kadardir acik" bilgisi kaymasin.
+      const merged = [...(to?.orders ?? []), ...moving]
+      next[toTableId] = to
+        ? { ...to, status: 'occupied', orders: merged }
+        : { ...from, status: 'occupied', orders: merged }
+
       return next
     })
+    setSelectedTableId(null)
   }
+
 
   // Move selected items from one order group into another table's active group.
   const handleMoveItemsToTable = (fromTableId, subOrderLocalId, itemIds, toTableId, toSubOrderLocalId = null) => {
@@ -995,7 +992,7 @@ function Tables() {
           onUpdateQty={handleUpdateQty}
           onRemoveItem={handleRemoveItem}
           onNewGroup={handleNewGroup}
-          onMoveOrderToTable={handleMoveOrderToTable}
+          onMoveWholeTable={handleMoveWholeTable}
           onMoveItemsToTable={handleMoveItemsToTable}
           onSetDiscount={handleSetDiscount}
           onPayOrder={(tableId, subOrderLocalId) => {

@@ -79,7 +79,7 @@ const CATEGORY_ICONS = {
 function OrderPanel({
   table, tables = [],
   onClose, onCloseTable, onAddItem, onUpdateNote, onRemoveItem,
-  onPayOrder, onNewGroup, onMoveOrderToTable, onMoveItemsToTable, onSetDiscount,
+  onPayOrder, onNewGroup, onMoveWholeTable, onMoveItemsToTable, onSetDiscount,
 }) {
   const { products, categories, productVariants, currentUser } = useApp()
   const canDiscount = hasPerm(currentUser, 'apply_discount')
@@ -229,9 +229,12 @@ function OrderPanel({
     setSelectedItemIds(new Set())
   }
 
+  // "Masayı Taşı" masanın TAMAMINI tasir. Eskiden yalnizca primaryGroup
+  // tasiniyordu; masada birden fazla grup varsa (QR alt siparisi, kismi odeme
+  // sonrasi acilan yeni siparis) geri kalanlar eski masada kaliyordu.
   const openMoveTablePicker = () => {
-    if (!primaryGroup) return
-    setTablePicker({ mode: 'emptyOnly', subOrderLocalId: primaryGroup.localId })
+    if (orders.length === 0) return
+    setTablePicker({ mode: 'emptyOnly' })
   }
 
   const openMoveItemsPicker = () => {
@@ -246,7 +249,7 @@ function OrderPanel({
   const handleTablePicked = (target) => {
     if (!tablePicker) return
     if (tablePicker.mode === 'emptyOnly') {
-      onMoveOrderToTable?.(table.id, tablePicker.subOrderLocalId, target.id)
+      onMoveWholeTable?.(table.id, target.id)
       setTablePicker(null)
       onClose()
     } else {
@@ -532,6 +535,9 @@ function OrderPanel({
                         <line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/>
                       </svg>
                       Masayı Taşı
+                      {orders.length > 1 && (
+                        <span className="om-move-count">{orders.length} sipariş</span>
+                      )}
                     </button>
                     <button className="om-secondary-btn" onClick={enterTransferMode}>
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

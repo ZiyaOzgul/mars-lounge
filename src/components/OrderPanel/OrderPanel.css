@@ -824,3 +824,14 @@
   border-radius: var(--radius-pill, 20px);
   padding: 3px 8px;
 }
+
+/* Masayı Taşı — birden fazla sipariş grubu varsa adet rozeti */
+.om-move-count {
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  background: var(--color-accent-light);
+  color: var(--color-accent-hover);
+  font-size: 10px;
+  font-weight: 700;
+}
