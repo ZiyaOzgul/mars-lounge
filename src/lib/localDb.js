@@ -2042,12 +2042,16 @@ export function getTopProducts(startIso, endIso) {
 export function getProductSalesDetail(startIso, endIso) {
   requireDb()
   const { clause, params } = _dateClause(startIso, endIso)
+  // "Günlük ortalama" böleni iş günü sayısı olmalı. Takvim günü sayarsak gece
+  // yarısını aşan bir gün iki gün gibi görünür ve ortalama olduğundan düşük
+  // çıkar. Bölme SQL'de yapılamıyor çünkü sınırlar day_closures'ta duruyor.
   const daysRes = db.exec(
-    `SELECT COUNT(DISTINCT date(closed_at,'localtime'))
-     FROM orders WHERE status='completed' ${clause}`,
+    `SELECT closed_at FROM orders WHERE status='completed' ${clause}`,
     params
   )
-  const days = daysRes[0]?.values[0][0] || 1
+  const closures = getDayClosures()
+  const daySet = new Set((daysRes[0]?.values ?? []).map(([iso]) => _businessDayOf(iso, closures)))
+  const days = daySet.size || 1
   const res = db.exec(
     `SELECT oi.name,
             COALESCE(c.name, '—') as cat_name,
