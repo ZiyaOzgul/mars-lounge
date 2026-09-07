@@ -426,3 +426,100 @@
 @keyframes tables-refresh-spin {
   to { transform: rotate(360deg); }
 }
+
+/* ── Günü Bitir ── */
+.tables-endday-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 15px;
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-pill);
+  background: var(--color-accent-light);
+  font-family: var(--font-main);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-accent-hover);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.tables-endday-btn:hover {
+  background: var(--color-accent);
+  color: #fff;
+}
+
+.tables-endday-body p { margin: 0 0 8px; font-size: 14px; line-height: 1.5; }
+.tables-endday-meta { font-size: 12px; color: var(--color-text-muted); }
+
+/* ── Gün bitirme hatırlatması ── */
+.tables-reminder-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1200;
+}
+
+.tables-reminder {
+  width: 380px;
+  max-width: calc(100vw - 40px);
+  padding: 26px 24px 20px;
+  background: var(--color-bg-card);
+  border-radius: 16px;
+  box-shadow: var(--color-shadow-md);
+  text-align: center;
+}
+
+.tables-reminder__icon {
+  width: 46px;
+  height: 46px;
+  margin: 0 auto 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--color-warning-light);
+  color: var(--color-warning);
+}
+
+.tables-reminder__title {
+  margin: 0 0 8px;
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.tables-reminder__text {
+  margin: 0 0 18px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+}
+
+.tables-reminder__actions { display: flex; gap: 8px; }
+
+.tables-reminder__later,
+.tables-reminder__go {
+  flex: 1;
+  padding: 10px 14px;
+  border-radius: var(--radius-input);
+  font-family: var(--font-main);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.tables-reminder__later {
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-secondary);
+}
+
+.tables-reminder__go {
+  border: none;
+  background: var(--color-accent);
+  color: #fff;
+}

@@ -5,7 +5,10 @@ import {
   ensurePersistedActiveOrder, getPaidItemIds, getOrderTotalPaid,
   setOrderStatus, consumeIngredients, moveOrderToTable, completeActiveOrder,
   getAllActiveOrders, deleteActiveOrderCascade,
+  getDayClosures, insertDayClosure,
 } from '../../lib/localDb.js'
+import { hoursSinceLastClosure } from '../../lib/businessDay.js'
+import ConfirmModal from '../../components/ConfirmModal/ConfirmModal.jsx'
 import { addPayments } from '../../lib/orderOperations.js'
 import { supabase, isSupabaseReady } from '../../lib/supabase.js'
 import { playAlertSound } from '../../lib/alertSound.js'
@@ -20,6 +23,9 @@ import './Tables.css'
 // Kaçırılan QR siparişlerini yakalama turu. Realtime asıl yol; bu yalnızca
 // soket sessizce koptuğunda devreye giren emniyet ağı.
 const PENDING_SWEEP_MS = 45_000
+
+// Son gün bitirmeden bu kadar saat geçtiyse bilgilendirme gösterilir.
+const CLOSURE_REMINDER_HOURS = 24
 
 function getLiveTime() {
   return new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })
@@ -48,6 +54,11 @@ function Tables() {
   const [tableFilter,    setTableFilter]    = useState('all') // 'all' | 'open'
   const [lowStockAlerts, setLowStockAlerts] = useState([])
   const [refreshing,     setRefreshing]     = useState(false)
+  const [closures,       setClosures]       = useState([])
+  const [endDayOpen,     setEndDayOpen]     = useState(false)
+  const [endingDay,      setEndingDay]      = useState(false)
+  // Hatırlatma yalnızca kapatılana kadar görünür; her açılışta yeniden değerlendirilir.
+  const [reminderDismissed, setReminderDismissed] = useState(false)
 
   useEffect(() => {
     const timer = setInterval(() => { setClock(getLiveTime()); setNowTs(Date.now()) }, 1000)
@@ -77,6 +88,37 @@ function Tables() {
       setTimeout(() => setRefreshing(false), 400)
     }
   }, [refreshing, rebuildRuntimeFromDb, isOnline, triggerSync])
+
+  // Gün bitirme kayıtları — raporların gün sınırı bunlara dayanıyor.
+  const reloadClosures = useCallback(() => {
+    try { setClosures(getDayClosures()) } catch { /* db henüz hazır değil */ }
+  }, [])
+
+  useEffect(() => { reloadClosures() }, [reloadClosures])
+
+  const isAdmin = currentUser?.role === 'admin'
+  const hoursSince = hoursSinceLastClosure(closures, new Date(nowTs))
+  const lastClosureIso = closures.length ? closures[closures.length - 1] : null
+  // Hiç kapanış yoksa hatırlatma göstermiyoruz: özellik yeni açıldığında
+  // her kasada uyarı çıkmasının anlamı yok.
+  const showReminder =
+    !reminderDismissed && hoursSince !== null && hoursSince >= CLOSURE_REMINDER_HOURS
+
+  const handleEndDay = async () => {
+    if (endingDay) return
+    setEndingDay(true)
+    try {
+      await insertDayClosure(currentUser?.id ?? null)
+      reloadClosures()
+      setReminderDismissed(true)
+      if (isOnline) triggerSync()
+    } catch (e) {
+      console.error('[Tables] gün bitirilemedi', e)
+    } finally {
+      setEndingDay(false)
+      setEndDayOpen(false)
+    }
+  }
 
   // ── Realtime QR order subscription ──────────────────────────────
   // Turns one pending order row into a queued approval card. Shared by the
@@ -902,6 +944,19 @@ function Tables() {
               <span className="stats-chip__label">BEKLEYEN</span>
               <span className="stats-chip__value">{bekleyen}</span>
             </div>
+            {isAdmin && (
+              <button
+                className="tables-endday-btn"
+                onClick={() => setEndDayOpen(true)}
+                title="Günü bitir — raporlar bu andan sonrasını yeni güne yazar"
+              >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 2v6M12 16v6M2 12h6M16 12h6" />
+                  <circle cx="12" cy="12" r="3" />
+                </svg>
+                Günü Bitir
+              </button>
+            )}
             <button
               className={`icon-btn tables-refresh${refreshing ? ' tables-refresh--busy' : ''}`}
               onClick={handleRefresh}
@@ -1022,6 +1077,68 @@ function Tables() {
           onComplete={handlePaymentComplete}
           onSetDiscount={handleSetDiscount}
         />
+      )}
+
+      {/* Günü bitirme onayı */}
+      <ConfirmModal
+        open={endDayOpen}
+        title="Günü bitir"
+        danger={false}
+        confirmText={endingDay ? 'Bitiriliyor…' : 'Evet, günü bitir'}
+        cancelText="Vazgeç"
+        onCancel={() => setEndDayOpen(false)}
+        onConfirm={handleEndDay}
+        message={
+          <div className="tables-endday-body">
+            <p>
+              Bu andan itibaren yapılan satışlar <strong>yeni güne</strong> yazılacak.
+              Gece açık kalınan saatler bugünün cirosunda kalır.
+            </p>
+            {lastClosureIso ? (
+              <p className="tables-endday-meta">
+                Son gün bitirme:{' '}
+                {new Date(lastClosureIso).toLocaleString('tr-TR', {
+                  day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit',
+                })}
+              </p>
+            ) : (
+              <p className="tables-endday-meta">
+                İlk gün bitirme kaydı — bundan öncesi takvim gününe göre raporlanır.
+              </p>
+            )}
+          </div>
+        }
+      />
+
+      {/* Gün bitirmeyi unutma hatırlatması — yalnızca bilgilendirme */}
+      {showReminder && (
+        <div className="tables-reminder-overlay" onClick={() => setReminderDismissed(true)}>
+          <div className="tables-reminder" onClick={e => e.stopPropagation()}>
+            <div className="tables-reminder__icon">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10" /><path d="M12 8v5M12 16h.01" />
+              </svg>
+            </div>
+            <h3 className="tables-reminder__title">Günü sonlandırmayı unuttunuz mu?</h3>
+            <p className="tables-reminder__text">
+              Son gün bitirmenin üzerinden <strong>{Math.floor(hoursSince)} saat</strong> geçti.
+              O zamandan beri yapılan tüm satışlar aynı güne yazılıyor.
+            </p>
+            <div className="tables-reminder__actions">
+              <button className="tables-reminder__later" onClick={() => setReminderDismissed(true)}>
+                Şimdilik kapat
+              </button>
+              {isAdmin && (
+                <button
+                  className="tables-reminder__go"
+                  onClick={() => { setReminderDismissed(true); setEndDayOpen(true) }}
+                >
+                  Günü bitir
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
       )}
 
       {qrTable && (

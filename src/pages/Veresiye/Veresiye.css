@@ -1,0 +1,287 @@
+/* ── Veresiyeler sayfası ─────────────────────────────────────────── */
+.vsy-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ── Başlık ── */
+.vsy-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.vsy-title {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  margin: 0 0 2px;
+}
+
+.vsy-subtitle {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.vsy-total-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  padding: 10px 18px;
+  background: var(--color-warning-light);
+  border: 1px solid var(--color-warning);
+  border-radius: var(--radius-card);
+}
+
+.vsy-total-chip__label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--color-text-secondary);
+}
+
+.vsy-total-chip__value {
+  font-size: 22px;
+  font-weight: 800;
+  color: var(--color-text-primary);
+}
+
+/* ── Kişi çipleri ── */
+.vsy-people {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.vsy-person {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: var(--color-bg-card);
+  cursor: pointer;
+  font-family: var(--font-main);
+  font-size: 13px;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.vsy-person:hover { border-color: var(--color-accent); }
+
+.vsy-person--active {
+  background: var(--color-accent-light);
+  border-color: var(--color-accent);
+}
+
+.vsy-person__name  { font-weight: 600; color: var(--color-text-primary); }
+.vsy-person__count { font-size: 11px; color: var(--color-text-muted); }
+.vsy-person__total { color: var(--color-warning); font-weight: 700; }
+
+/* ── Filtreler ── */
+.vsy-filters {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 12px 14px;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+}
+
+.vsy-tabs {
+  display: flex;
+  gap: 4px;
+  background: var(--color-bg-page);
+  border-radius: var(--radius-pill);
+  padding: 3px;
+}
+
+.vsy-tab {
+  padding: 6px 16px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  font-family: var(--font-main);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.vsy-tab--active {
+  background: var(--color-accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+.vsy-search {
+  flex: 1;
+  min-width: 160px;
+  padding: 8px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-input);
+  background: var(--color-bg-page);
+  font-family: var(--font-main);
+  font-size: 13px;
+  color: var(--color-text-primary);
+}
+
+.vsy-search:focus { outline: none; border-color: var(--color-accent); }
+
+.vsy-date {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.vsy-date input {
+  padding: 7px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-input);
+  background: var(--color-bg-page);
+  font-family: var(--font-main);
+  font-size: 13px;
+  color: var(--color-text-primary);
+  cursor: pointer;
+}
+
+.vsy-date input:focus { outline: none; border-color: var(--color-accent); }
+
+.vsy-clear {
+  padding: 7px 13px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  font-family: var(--font-main);
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.vsy-clear:hover { border-color: var(--color-danger); color: var(--color-danger); }
+
+/* ── Liste ── */
+.vsy-count {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.vsy-empty {
+  padding: 40px;
+  text-align: center;
+  font-size: 14px;
+  color: var(--color-text-muted);
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-card);
+}
+
+.vsy-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.vsy-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-warning);
+  border-radius: var(--radius-input);
+}
+
+.vsy-row--settled {
+  border-left-color: var(--color-success);
+  background: #fbfdfb;
+}
+
+.vsy-row__main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1;
+  min-width: 180px;
+}
+
+.vsy-row__name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.vsy-row__meta {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.vsy-badge {
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.vsy-badge--open { background: var(--color-warning-light); color: #a16207; }
+.vsy-badge--paid { background: var(--color-success-light); color: #15803d; }
+
+.vsy-row__amount {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  min-width: 100px;
+  text-align: right;
+}
+
+.vsy-row__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.vsy-hint,
+.vsy-settled-info {
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+.vsy-settle,
+.vsy-undo {
+  padding: 6px 13px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: var(--color-bg-card);
+  font-family: var(--font-main);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.vsy-settle:hover:not(:disabled) {
+  background: var(--color-success);
+  border-color: var(--color-success);
+  color: #fff;
+}
+
+.vsy-undo:hover:not(:disabled) {
+  background: var(--color-danger-light);
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+
+.vsy-settle:disabled,
+.vsy-undo:disabled { opacity: 0.5; cursor: progress; }

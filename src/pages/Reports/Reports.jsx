@@ -11,7 +11,9 @@ import {
   getCategoryRevenue, getIngredientConsumption,
   getOrdersList, getOrderItems,
   getStaffPerformance, getStaffItemBreakdown,
+  getDayClosures,
 } from '../../lib/localDb.js'
+import { businessRange } from '../../lib/businessDay.js'
 import './Reports.css'
 
 const TABS = [
@@ -37,40 +39,12 @@ const SINGLE_DAY_TABS = new Set(['today', 'yesterday', 'day'])
 const pad2 = n => String(n).padStart(2, '0')
 const toIso = d => d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate())
 
-function getDateRange(tabId, customDay) {
-  const now = new Date()
-  const pad = n => String(n).padStart(2, '0')
-  const fmt = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`
-
-  if (tabId === 'today') {
-    const today = fmt(now)
-    return [today, today]
-  }
-  if (tabId === 'yesterday') {
-    const y = new Date(now)
-    y.setDate(now.getDate() - 1)
-    const iso = fmt(y)
-    return [iso, iso]
-  }
-  if (tabId === 'day') {
-    const iso = customDay || fmt(now)
-    return [iso, iso]
-  }
-  if (tabId === 'week') {
-    const day = now.getDay()
-    const diffToMon = day === 0 ? -6 : 1 - day
-    const mon = new Date(now); mon.setDate(now.getDate() + diffToMon)
-    const sun = new Date(mon); sun.setDate(mon.getDate() + 6)
-    return [fmt(mon), fmt(sun)]
-  }
-  if (tabId === 'month') {
-    const y = now.getFullYear(), m = now.getMonth()
-    const daysInMonth = new Date(y, m + 1, 0).getDate()
-    return [`${y}-${pad(m+1)}-01`, `${y}-${pad(m+1)}-${pad(daysInMonth)}`]
-  }
-  return [null, null]
+// Rapor aralıkları artık takvim gününe değil "Günü Bitir" sınırlarına
+// dayanıyor — bkz. src/lib/businessDay.js. Dönen değerler tam zaman
+// damgasıdır ve aralık üst sınır hariçtir.
+function getDateRange(tabId, customDay, closures) {
+  return businessRange(tabId, closures, new Date(), customDay)
 }
-
 function fmtCurrency(n) {
   return '₺' + Number(n).toLocaleString('tr-TR', { minimumFractionDigits: 0, maximumFractionDigits: 0 })
 }
@@ -94,6 +68,7 @@ function Reports() {
   const [periodData,   setPeriodData]   = useState([])
   const [paymentData,  setPaymentData]  = useState([{ name: 'Nakit', value: 0 }, { name: 'Kart', value: 0 }, { name: 'IBAN', value: 0 }, { name: 'Veresiye', value: 0 }])
   const [veresiye,     setVeresiye]     = useState({ periodTotal: 0, openTotal: 0 })
+  const [closures,     setClosures]     = useState([])
   // Veresiye parasi henuz kasaya girmedigi icin varsayilan olarak cirodan
   // dusuluyor. Kapatinca satis anindaki ciro gorunur.
   const [veresiyeExcluded, setVeresiyeExcluded] = useState(true)
@@ -114,10 +89,14 @@ function Reports() {
   /* eslint-disable react-hooks/set-state-in-effect -- reads the external sql.js store into state */
   useEffect(() => {
     if (!dbReady) return
-    const [start, end] = getDateRange(activeTab, customDay)
+    // Gün sınırları her turda yeniden okunur: "Günü Bitir" basıldığında
+    // raporlar aynı anda yeni sınıra geçsin.
+    const cls = getDayClosures()
+    setClosures(cls)
+    const [start, end] = getDateRange(activeTab, customDay, cls)
     setKpis(getReportKpis(start, end))
     setTopProduct(getTopProduct(start, end))
-    setPeriodData(getRevenueByPeriod(activeTab, start))
+    setPeriodData(getRevenueByPeriod(activeTab, start, end, cls))
     setPaymentData(getPaymentBreakdown(start, end))
     setPaymentDetail(getPaymentMethodDetail(start, end))
     setVeresiye(getVeresiyeSummary(start, end))
@@ -137,13 +116,13 @@ function Reports() {
   const maxTableRev  = tableRevData.reduce((m, r) => Math.max(m, r.value), 0) || 1
 
   function openTableModal(row) {
-    const [start, end] = getDateRange(activeTab, customDay)
+    const [start, end] = getDateRange(activeTab, customDay, closures)
     const items = getTableProductBreakdown(row.name, start, end)
     setTableModal({ name: row.name, items, total: row.value })
   }
 
   function openProductModal(p) {
-    const [start, end] = getDateRange(activeTab, customDay)
+    const [start, end] = getDateRange(activeTab, customDay, closures)
     const rows = getProductTableBreakdown(p.name, start, end)
     setProductModal({ name: p.name, qty: p.qty, revenue: p.revenue, rows })
   }
@@ -159,7 +138,7 @@ function Reports() {
   }
 
   function openStaffModal(row) {
-    const [start, end] = getDateRange(activeTab, customDay)
+    const [start, end] = getDateRange(activeTab, customDay, closures)
     const items = getStaffItemBreakdown(row.name, start, end)
     setStaffModal({ name: row.name, orderCount: row.orderCount, revenue: row.revenue, items })
   }
@@ -175,7 +154,7 @@ function Reports() {
 
   // Tek gün modlarında grafiğin altına saat aralığı yerine günün kendisini
   // yaz — "dün mü bugün mü bakıyorum" sorusu tek bakışta cevaplansın.
-  const [rangeStart] = getDateRange(activeTab, customDay)
+  const [rangeStart] = getDateRange(activeTab, customDay, closures)
   const singleDayLabel = SINGLE_DAY_TABS.has(activeTab) && rangeStart
     ? new Date(`${rangeStart}T00:00:00`).toLocaleDateString('tr-TR', {
         day: 'numeric', month: 'long', year: 'numeric', weekday: 'long',
@@ -389,11 +368,11 @@ function Reports() {
                 <div className="rpt-pay-detail__row rpt-pay-detail__row--veresiye">
                   <span>
                     Veresiye verilen
-                    {veresiye.openTotal > 0 && veresiye.openTotal !== veresiye.periodTotal && (
-                      <em className="rpt-pay-detail__hint">
-                        {fmtCurrency(veresiye.openTotal)} hâlâ açık
-                      </em>
-                    )}
+                    <em className="rpt-pay-detail__hint">
+                      {veresiye.openTotal > 0
+                        ? `${fmtCurrency(veresiye.openTotal)} tahsil edilmedi`
+                        : 'tamamı tahsil edildi'}
+                    </em>
                   </span>
                   <span>{fmtCurrency(veresiye.periodTotal)}</span>
                 </div>
@@ -406,13 +385,13 @@ function Reports() {
               <div className="rpt-pay-detail__row">
                 <span>Ciro (indirimsiz / brüt)</span>
                 <span>
-                  {fmtCurrency(paymentDetail.grossRevenue - (veresiyeExcluded ? veresiye.periodTotal : 0))}
+                  {fmtCurrency(paymentDetail.grossRevenue - (veresiyeExcluded ? veresiye.openTotal : 0))}
                 </span>
               </div>
               <div className="rpt-pay-detail__row rpt-pay-detail__row--net">
                 <span>Ciro (indirimli / net)</span>
                 <span>
-                  {fmtCurrency(paymentDetail.netRevenue - (veresiyeExcluded ? veresiye.periodTotal : 0))}
+                  {fmtCurrency(paymentDetail.netRevenue - (veresiyeExcluded ? veresiye.openTotal : 0))}
                 </span>
               </div>
 
@@ -427,8 +406,8 @@ function Reports() {
                     Veresiyeyi cirodan düş
                     <em>
                       {veresiyeExcluded
-                        ? 'Yalnızca kasaya giren para sayılıyor.'
-                        : 'Veresiye satışlar da ciroya dahil.'}
+                        ? 'Tahsil edilmemiş veresiye ciroya girmiyor. Ödendi işaretlenince otomatik eklenir.'
+                        : 'Tahsil edilmemiş veresiye de ciroya dahil.'}
                     </em>
                   </span>
                 </label>

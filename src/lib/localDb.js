@@ -323,6 +323,16 @@ export async function initDb() {
     `CREATE INDEX IF NOT EXISTS idx_order_item_modifiers_item_id   ON order_item_modifiers(order_item_id)`,
     // Small key/value store for one-time maintenance flags (travels with the DB file)
     `CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)`,
+    // "Gunu Bitir" kayitlari — raporlarin gun siniri. Bkz. src/lib/businessDay.js
+    `CREATE TABLE IF NOT EXISTS day_closures (
+      id         INTEGER PRIMARY KEY,
+      local_id   TEXT UNIQUE NOT NULL,
+      closed_at  TEXT NOT NULL,
+      closed_by  TEXT,
+      is_synced  INTEGER NOT NULL DEFAULT 0,
+      remote_id  TEXT
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_day_closures_closed_at ON day_closures(closed_at DESC)`,
     // Offline login fallback: PBKDF2 salt+hash per email, saved on every
     // successful online login so the same account can log in with no
     // internet on this device. Never stores the plaintext password.
@@ -1674,15 +1684,75 @@ export function getUnsyncedCount() {
   return res[0]?.values[0][0] ?? 0
 }
 
+// ── Gün bitirme (iş günü sınırları) ───────────────────────────────
+// Kapanış anları raporların gün sınırını belirler; hesaplama mantığı
+// src/lib/businessDay.js içinde, burada yalnızca saklama var.
+
+/** Artan sırada tüm kapanış anları (ISO). */
+export function getDayClosures() {
+  requireDb()
+  const res = db.exec('SELECT closed_at FROM day_closures ORDER BY closed_at ASC')
+  return res.length ? res[0].values.map(([c]) => c) : []
+}
+
+/** En son kapanış anı, yoksa null. */
+export function getLastDayClosure() {
+  const all = getDayClosures()
+  return all.length ? all[all.length - 1] : null
+}
+
+export async function insertDayClosure(closedBy = null, closedAt = null) {
+  requireDb()
+  const iso = closedAt || new Date().toISOString()
+  const localId = `dc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  db.run(
+    'INSERT INTO day_closures (id, local_id, closed_at, closed_by, is_synced) VALUES (?, ?, ?, ?, 0)',
+    [newLocalId(), localId, iso, closedBy || null]
+  )
+  await persistDb()
+  return { localId, closedAt: iso }
+}
+
+export function getUnsyncedDayClosures() {
+  requireDb()
+  const res = db.exec(
+    'SELECT id, local_id, closed_at, closed_by FROM day_closures WHERE is_synced = 0'
+  )
+  return res.length ? res[0].values : []
+}
+
+export async function markDayClosureSynced(id, remoteId) {
+  requireDb()
+  db.run('UPDATE day_closures SET is_synced = 1, remote_id = ? WHERE id = ?', [String(remoteId), id])
+  await persistDb()
+}
+
+/** Supabase'den gelen kapanışı yerelde yoksa ekler (local_id ile tekilleştirir). */
+export async function upsertRemoteDayClosure({ localId, closedAt, closedBy, remoteId }) {
+  requireDb()
+  const exists = db.exec('SELECT 1 FROM day_closures WHERE local_id = ? LIMIT 1', [localId])
+  if (exists.length && exists[0].values.length) return false
+  db.run(
+    'INSERT INTO day_closures (id, local_id, closed_at, closed_by, is_synced, remote_id) VALUES (?, ?, ?, ?, 1, ?)',
+    [newLocalId(), localId, closedAt, closedBy || null, remoteId != null ? String(remoteId) : null]
+  )
+  await persistDb()
+  return true
+}
+
 // ── Reporting queries ─────────────────────────────────────────────
 
+// Rapor aralıkları artık takvim günü değil İŞ GÜNÜ sınırlarına dayanıyor:
+// startIso/endIso tam zaman damgasıdır ve aralık [başlangıç, bitiş) —
+// üst sınır hariçtir. closed_at UTC ISO olarak saklandığı için düz metin
+// karşılaştırması doğru sıralamayı verir. null = o yönde sınır yok.
 function _dateClause(startIso, endIso) {
-  if (!startIso && !endIso) return { clause: '', params: [] }
-  if (startIso === endIso)  return { clause: "AND date(closed_at,'localtime') = ?", params: [startIso] }
-  return {
-    clause: "AND date(closed_at,'localtime') >= ? AND date(closed_at,'localtime') <= ?",
-    params: [startIso, endIso],
-  }
+  const parts = []
+  const params = []
+  if (startIso) { parts.push('closed_at >= ?'); params.push(startIso) }
+  if (endIso)   { parts.push('closed_at < ?');  params.push(endIso) }
+  if (!parts.length) return { clause: '', params: [] }
+  return { clause: 'AND ' + parts.join(' AND '), params }
 }
 
 export function getReportKpis(startIso, endIso) {
@@ -1712,85 +1782,95 @@ export function getTopProduct(startIso, endIso) {
   return { name, qty }
 }
 
-export function getRevenueByPeriod(mode, isoDay = null) {
-  requireDb()
+// src/lib/businessDay.js'deki businessDayOf ile aynı mantık. Burada ayrı
+// duruyor çünkü localDb tarayıcı/Electron dışında da (testlerde) yükleniyor
+// ve ek import zinciri istemiyoruz.
+function _businessDayOf(iso, closuresAsc = []) {
   const pad = n => String(n).padStart(2, '0')
-  const fmt = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`
-  const now = new Date()
-
-  // Tek gün modları — bugün, dün ve tarih seçiciyle gelen gün — aynı saatlik
-  // dökümü paylaşır; hangi gün olduğu isoDay ile bildirilir.
-  if (mode === 'today' || mode === 'yesterday' || mode === 'day') {
-    const today = isoDay ?? fmt(now)
-    const res = db.exec(
-      `SELECT CAST(strftime('%H', closed_at,'localtime') AS INTEGER) as h, COALESCE(SUM(total),0)
-       FROM orders WHERE status='completed' AND date(closed_at,'localtime') = ?
-       GROUP BY h`,
-      [today]
-    )
-    const map = {}
-    if (res.length) res[0].values.forEach(([h, v]) => { map[h] = v })
-    // Full 24-hour window (00–23)
-    return Array.from({ length: 24 }, (_, h) => (
-      { label: `${pad(h)}:00`, value: map[h] ?? 0 }
-    ))
+  const asLocal = (v) => {
+    const x = new Date(v)
+    return `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())}`
   }
-
-  if (mode === 'week') {
-    const day = now.getDay()
-    const diffToMon = day === 0 ? -6 : 1 - day
-    const mon = new Date(now); mon.setDate(now.getDate() + diffToMon)
-    const days = Array.from({ length: 7 }, (_, i) => {
-      const d = new Date(mon); d.setDate(mon.getDate() + i); return fmt(d)
-    })
-    const labels = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cts', 'Paz']
-    const res = db.exec(
-      `SELECT date(closed_at,'localtime'), COALESCE(SUM(total),0)
-       FROM orders WHERE status='completed'
-         AND date(closed_at,'localtime') >= ? AND date(closed_at,'localtime') <= ?
-       GROUP BY date(closed_at,'localtime')`,
-      [days[0], days[6]]
-    )
-    const map = {}
-    if (res.length) res[0].values.forEach(([d, v]) => { map[d] = v })
-    return days.map((d, i) => ({ label: labels[i], value: map[d] ?? 0 }))
+  const closures = [...closuresAsc].sort()
+  if (!closures.length || iso < closures[0]) return asLocal(iso)
+  let start = closures[0]
+  for (const c of closures) {
+    if (c <= iso) start = c
+    else break
   }
-
-  if (mode === 'month') {
-    const y = now.getFullYear(), m = now.getMonth()
-    const daysInMonth = new Date(y, m + 1, 0).getDate()
-    const start = `${y}-${pad(m+1)}-01`
-    const end   = `${y}-${pad(m+1)}-${pad(daysInMonth)}`
-    const res = db.exec(
-      `SELECT CAST(strftime('%d', closed_at,'localtime') AS INTEGER) as d, COALESCE(SUM(total),0)
-       FROM orders WHERE status='completed'
-         AND date(closed_at,'localtime') >= ? AND date(closed_at,'localtime') <= ?
-       GROUP BY d`,
-      [start, end]
-    )
-    const map = {}
-    if (res.length) res[0].values.forEach(([d, v]) => { map[d] = v })
-    return Array.from({ length: daysInMonth }, (_, i) => ({ label: String(i+1), value: map[i+1] ?? 0 }))
-  }
-
-  // total — group by month
-  const TR_MONTHS = ['Oca','Şub','Mar','Nis','May','Haz','Tem','Ağu','Eyl','Eki','Kas','Ara']
-  const res = db.exec(
-    `SELECT strftime('%Y-%m', closed_at,'localtime') as mo, COALESCE(SUM(total),0)
-     FROM orders WHERE status='completed'
-     GROUP BY mo ORDER BY mo`
-  )
-  if (!res.length || !res[0].values.length) {
-    const mo = `${now.getFullYear()}-${pad(now.getMonth()+1)}`
-    const [y2, m2] = mo.split('-')
-    return [{ label: `${TR_MONTHS[parseInt(m2)-1]} ${y2.slice(2)}`, value: 0 }]
-  }
-  return res[0].values.map(([mo, v]) => {
-    const [y2, m2] = mo.split('-')
-    return { label: `${TR_MONTHS[parseInt(m2)-1]} ${y2.slice(2)}`, value: v }
-  })
+  return asLocal(start)
 }
 
+export function getRevenueByPeriod(mode, rangeStart, rangeEnd, closures = []) {
+  requireDb()
+  const pad = n => String(n).padStart(2, '0')
+
+  // Aralıktaki tamamlanmış satışları çek; kovalama JS tarafında yapılıyor
+  // çünkü iş günü sınırları SQL'de ifade edilemiyor (kapanış anları veriye
+  // değil, ayrı bir tabloya dayanıyor).
+  const { clause, params } = _dateClause(rangeStart, rangeEnd)
+  const res = db.exec(
+    `SELECT closed_at, COALESCE(total,0) FROM orders
+     WHERE status='completed' ${clause}`,
+    params
+  )
+  const rows = res.length ? res[0].values : []
+
+  // ── Tek gün: saatlik döküm ──
+  if (mode === 'today' || mode === 'yesterday' || mode === 'day') {
+    const map = {}
+    for (const [iso, total] of rows) {
+      const h = new Date(iso).getHours()
+      map[h] = (map[h] ?? 0) + Number(total)
+    }
+    return Array.from({ length: 24 }, (_, h) => ({ label: `${pad(h)}:00`, value: map[h] ?? 0 }))
+  }
+
+  // ── Hafta / Ay: iş günü bazında döküm ──
+  if (mode === 'week' || mode === 'month') {
+    const map = {}
+    for (const [iso, total] of rows) {
+      const d = _businessDayOf(iso, closures)
+      map[d] = (map[d] ?? 0) + Number(total)
+    }
+    if (mode === 'week') {
+      const now = new Date()
+      const day = now.getDay()
+      const mon = new Date(now); mon.setDate(now.getDate() + (day === 0 ? -6 : 1 - day))
+      const labels = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cts', 'Paz']
+      return Array.from({ length: 7 }, (_, i) => {
+        const d = new Date(mon); d.setDate(mon.getDate() + i)
+        const key = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+        return { label: labels[i], value: map[key] ?? 0 }
+      })
+    }
+    const now = new Date()
+    const y = now.getFullYear(), m = now.getMonth()
+    const daysInMonth = new Date(y, m + 1, 0).getDate()
+    return Array.from({ length: daysInMonth }, (_, i) => {
+      const key = `${y}-${pad(m + 1)}-${pad(i + 1)}`
+      return { label: String(i + 1), value: map[key] ?? 0 }
+    })
+  }
+
+  // ── Toplam: aylık döküm ──
+  const TR_MONTHS = ['Oca','Şub','Mar','Nis','May','Haz','Tem','Ağu','Eyl','Eki','Kas','Ara']
+  const map = {}
+  for (const [iso, total] of rows) {
+    const d = _businessDayOf(iso, closures)
+    const key = d.slice(0, 7)
+    map[key] = (map[key] ?? 0) + Number(total)
+  }
+  const keys = Object.keys(map).sort()
+  if (!keys.length) {
+    const now = new Date()
+    return [{ label: `${TR_MONTHS[now.getMonth()]} ${String(now.getFullYear()).slice(2)}`, value: 0 }]
+  }
+  return keys.map(k => {
+    const [y2, m2] = k.split('-')
+    return { label: `${TR_MONTHS[parseInt(m2) - 1]} ${y2.slice(2)}`, value: map[k] }
+  })
+}
 export function getPaymentBreakdown(startIso, endIso) {
   requireDb()
   const { clause, params } = _dateClause(startIso, endIso)
@@ -1841,17 +1921,17 @@ export function getVeresiyeSummary(startIso, endIso) {
   return { periodTotal, openTotal }
 }
 
-// Defter: kişi bazında toplanmış borçlar. onlyOpen=true ise yalnızca açık
-// olanlar. Tarih aralığı vermeden çağrılırsa tüm zamanları kapsar — defterin
+// Defter kayıtları. status: open | settled | all. Tarih aralığı vermeden çağrılırsa tüm zamanları kapsar — defterin
 // amacı "kim ne kadar borçlu" olduğu, dönemsel rapor değil.
-export function getVeresiyeLedger({ onlyOpen = true } = {}) {
+export function getVeresiyeLedger({ status = 'open' } = {}) {
   requireDb()
   const res = db.exec(
     `SELECT p.id, p.local_id, COALESCE(NULLIF(TRIM(p.payer_label),''),'(isimsiz)'),
             p.amount, p.created_at, p.settled_at, p.settled_method,
             o.table_name, o.id
      FROM payments p JOIN orders o ON o.id = p.order_id
-     WHERE p.payment_method='veresiye' ${onlyOpen ? 'AND p.settled_at IS NULL' : ''}
+     WHERE p.payment_method='veresiye'
+           ${status === 'open' ? 'AND p.settled_at IS NULL' : status === 'settled' ? 'AND p.settled_at IS NOT NULL' : ''}
      ORDER BY p.created_at DESC`
   )
   if (!res.length) return []

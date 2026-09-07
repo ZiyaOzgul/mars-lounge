@@ -30,6 +30,7 @@ import {
   getUnsyncedPaymentItems, markPaymentItemSynced,
   setOrderItemRemoteId,
   persistDb,
+  getUnsyncedDayClosures, markDayClosureSynced, upsertRemoteDayClosure,
 } from './localDb.js'
 
 function fmtErr(e) {
@@ -537,6 +538,23 @@ export async function syncToSupabase(log = null) {
     }
   }
 
+  // ── Gün bitirme kayıtları ─────────────────────────────────────
+  // Raporların gün sınırı bunlara dayanıyor; yerel veritabanı sıfırlanırsa
+  // sınırlar kaybolmasın diye Supabase'e de yazılıyor.
+  for (const [id, local_id, closed_at, closed_by] of getUnsyncedDayClosures()) {
+    const { data, error } = await supabase
+      .from('day_closures')
+      .upsert({ local_id, closed_at, closed_by: closed_by || null }, { onConflict: 'local_id' })
+      .select('id')
+      .single()
+    if (!error && data) {
+      await markDayClosureSynced(id, data.id)
+      ok(`[Sync] ✓ Gün bitirme kaydı → ${closed_at}`)
+    } else if (error) {
+      err('[Sync] ✗ Gün bitirme kaydı yüklenemedi', error)
+    }
+  }
+
   // ── Payment items (junction) ──────────────────────────────────
   // Each row already has BOTH a payment.remote_id AND an order_item.remote_id at this point
   // because payments + order_items were just pushed above.
@@ -577,6 +595,31 @@ export async function syncToSupabase(log = null) {
 }
 
 export async function pullFromSupabase(log = null) {
+  // ── Gün bitirme kayıtları ─────────────────────────────────────
+  // Başka bir cihazda ya da yeniden kurulumdan önce atılmış kapanışları geri
+  // getirir; local_id ile tekilleştirildiği için tekrar çalışmak zararsız.
+  try {
+    const { data: closures, error: clErr } = await supabase
+      .from('day_closures')
+      .select('id, local_id, closed_at, closed_by')
+      .order('closed_at', { ascending: true })
+    if (clErr) {
+      console.warn('[Sync] gün bitirme kayıtları çekilemedi', clErr)
+    } else {
+      let added = 0
+      for (const c of closures ?? []) {
+        const isNew = await upsertRemoteDayClosure({
+          localId: c.local_id, closedAt: c.closed_at,
+          closedBy: c.closed_by, remoteId: c.id,
+        })
+        if (isNew) added++
+      }
+      if (added > 0) console.log(`[Sync] ↓ ${added} gün bitirme kaydı indirildi`)
+    }
+  } catch (e) {
+    console.warn('[Sync] gün bitirme senkronu atlandı', e)
+  }
+
   const ok  = (msg) => { console.log(msg);        log?.('success', msg) }
   const err = (msg, e) => { console.error(msg, fmtErr(e), e); log?.('error',  `${msg} — ${fmtErr(e)}`) }
 
