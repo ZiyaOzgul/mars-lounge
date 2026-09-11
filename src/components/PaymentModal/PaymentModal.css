@@ -84,6 +84,16 @@
   color: var(--color-text-primary);
 }
 
+.pm-header__close:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pm-header__close:disabled:hover {
+  background-color: var(--color-bg-card);
+  color: var(--color-text-secondary);
+}
+
 /* ── Body (two columns) ── */
 .pm-body {
   display: flex;
@@ -1077,6 +1087,30 @@
   font-weight: 800;
   cursor: pointer;
   flex-shrink: 0;
+}
+
+/* ── FIX 3: görünür ödeme hatası ── */
+.pm-error-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  margin-top: 4px;
+  border-radius: var(--radius-input);
+  background: var(--color-danger-light, #fee2e2);
+  border: 1px solid var(--color-danger, #ef4444);
+}
+
+.pm-error-banner strong {
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--color-danger, #ef4444);
+}
+
+.pm-error-banner span {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--color-danger, #ef4444);
 }
 
 /* ── Commit summary ── */

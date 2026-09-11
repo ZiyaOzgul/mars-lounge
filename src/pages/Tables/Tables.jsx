@@ -40,6 +40,36 @@ function groupSubtotal(items) {
   return (items ?? []).reduce((s, i) => s + i.qty * (i.unitPrice + modSum(i.modifiers)), 0)
 }
 
+// FIX 2 — bir masaya sabit ₺ indirim uygulandıktan sonra ürün silinir/adet
+// azaltılırsa ara toplam küçülebilir; indirim tutarı buna göre yeniden
+// sınırlandırılmazsa toplam sıfıra (hatta altına) düşebiliyordu (₺140'lık
+// ürün ₺0 karşılığında kapanıyordu). DiscountEditor giriş anında aynı kuralı
+// uyguluyor (amount < subtotal, kesin küçük) — burada da aynı kuralı koruyup
+// ödenmemiş ürün varken toplamın asla sıfıra inmemesini garanti ediyoruz.
+// Tek yetkili nokta burası: OrderPanel ve PaymentModal ikisi de yalnızca
+// table.discount.amount'u okuyor, biz burada zaten sınırlanmış değeri
+// yazıyoruz — ayrı ayrı yamamaya gerek kalmıyor, makbuz da (receipt.js)
+// aynı okunan değeri kullandığı için otomatik tutarlı kalıyor.
+function clampDiscountToSubtotal(discount, subtotal, existingNotice) {
+  if (!discount || !(Number(discount.amount) > 0)) {
+    return { discount, notice: existingNotice ?? null }
+  }
+  // Kuruş hassasiyetinde en az 0.01 borç kalsın — tam subtotal'e eşitlemek
+  // aynı hatayı (toplam sıfır) yeniden üretir.
+  const maxAllowed = Math.max(0, Math.round((subtotal - 0.01) * 100) / 100)
+  if (discount.amount <= maxAllowed) {
+    return { discount, notice: existingNotice ?? null }
+  }
+  // Bildirimdeki "önceki tutar" hep kasiyerin girdiği ORİJİNAL değeri
+  // göstersin — art arda küçülmelerde ara adımları değil.
+  const from = existingNotice?.from ?? discount.amount
+  const notice = { from, to: maxAllowed }
+  return {
+    discount: maxAllowed > 0 ? { ...discount, amount: maxAllowed } : null,
+    notice,
+  }
+}
+
 function Tables() {
   const { tableDefs, triggerSync, isOnline, runtimeStates, setRuntimeStates, currentUser, logoutUser,
           rebuildRuntimeFromDb } = useApp()
@@ -59,6 +89,15 @@ function Tables() {
   const [endingDay,      setEndingDay]      = useState(false)
   // Hatırlatma yalnızca kapatılana kadar görünür; her açılışta yeniden değerlendirilir.
   const [reminderDismissed, setReminderDismissed] = useState(false)
+  // FEATURE — "Masayı İptal Et": onay bekleyen hedef (tüm masa ya da tek grup).
+  const [cancelTarget,   setCancelTarget]   = useState(null)
+  const [cancelling,     setCancelling]     = useState(false)
+  // FIX 3 — ödeme akışı: masa bazlı çift-gönderim kilidi + görünür hata.
+  // Ref eşzamanlı (senkron) kontrol için — aynı tık anında iki kez çağrılmayı
+  // React state güncellemesinin render'a yansımasını beklemeden engeller.
+  const payingTableIdsRef = useRef(new Set())
+  const [payingTableIds, setPayingTableIds] = useState(() => new Set())
+  const [paymentError,   setPaymentError]   = useState(null) // { tableId, message } | null
 
   useEffect(() => {
     const timer = setInterval(() => { setClock(getLiveTime()); setNowTs(Date.now()) }, 1000)
@@ -467,9 +506,14 @@ function Tables() {
     setRuntimeStates(prev => {
       const existing = prev[tableId]
       if (!existing) return prev
-      return { ...prev, [tableId]: { ...existing, discount: discount ?? undefined } }
+      // Kasiyerin bilinçli her indirim işlemi (uygula/kaldır/bildirim
+      // kapat — bkz. OrderPanel'in "Tamam" tuşu) eski küçülme bildirimini
+      // temizler; artık geçerli olan yeni değeri görüyor.
+      return { ...prev, [tableId]: { ...existing, discount: discount ?? undefined, discountClampNotice: undefined } }
     })
-    setPaymentTable(prev => (prev && prev.id === tableId) ? { ...prev, discount: discount ?? undefined } : prev)
+    setPaymentTable(prev => (prev && prev.id === tableId)
+      ? { ...prev, discount: discount ?? undefined, discountClampNotice: undefined }
+      : prev)
   }
 
   const handleUpdateQty = (tableId, itemId, newQty, subOrderLocalId) => {
@@ -481,7 +525,11 @@ function Tables() {
         if (subOrderLocalId && o.localId !== subOrderLocalId) return o
         return { ...o, items: o.items.map(i => (i.id === itemId && !i.paid) ? { ...i, qty: newQty } : i) }
       })
-      return { ...prev, [tableId]: { ...existing, orders: newOrders } }
+      // FIX 2: adet düşürüldüğünde ara toplam küçülebilir — indirimi güncel
+      // ara toplama göre yeniden sınırlandır (bkz. clampDiscountToSubtotal).
+      const newSubtotal = groupSubtotal(newOrders.flatMap(o => o.items))
+      const { discount, notice } = clampDiscountToSubtotal(existing.discount, newSubtotal, existing.discountClampNotice)
+      return { ...prev, [tableId]: { ...existing, orders: newOrders, discount: discount ?? undefined, discountClampNotice: notice ?? undefined } }
     })
   }
 
@@ -519,8 +567,118 @@ function Tables() {
         delete next[tableId]
         return next
       }
-      return { ...prev, [tableId]: { ...existing, orders: newOrders } }
+      // FIX 2: ürün kaldırıldığında ara toplam küçülebilir — indirimi güncel
+      // ara toplama göre yeniden sınırlandır (bkz. clampDiscountToSubtotal).
+      const newSubtotal = groupSubtotal(newOrders.flatMap(o => o.items))
+      const { discount, notice } = clampDiscountToSubtotal(existing.discount, newSubtotal, existing.discountClampNotice)
+      return { ...prev, [tableId]: { ...existing, orders: newOrders, discount: discount ?? undefined, discountClampNotice: notice ?? undefined } }
     })
+  }
+
+  // ── "Masayı İptal Et" ───────────────────────────────────────────
+  // Masa yanlışlıkla açıldığında ürünleri tek tek silmek yerine tüm siparişi
+  // (ya da scopeGroupLocalId verilmişse tek grubu) tek adımda iptal eder.
+  // scopeGroupLocalId = null → tüm masa, aksi halde tek sipariş grubu —
+  // applyPaymentTx'in scopeGroupLocalId kuralıyla aynı kural.
+  //
+  // Güvenlik: hiçbir kapsamda kısmi/parça ödeme varsa iptal edilmez — para
+  // kaydını yok etmemek için. Bu, hem butonu devre dışı bırakan OrderPanel
+  // tarafında hem de burada (onay tıklanmadan hemen önce) iki kez kontrol
+  // edilir.
+  const groupHasPayment = (g) => (g?.paidAmount ?? 0) > 0 || (g?.items ?? []).some(i => i.paid)
+
+  const requestCancelTable = (tableId, scopeGroupLocalId) => {
+    const state = runtimeStates[tableId]
+    const groups = scopeGroupLocalId
+      ? (state?.orders ?? []).filter(o => o.localId === scopeGroupLocalId)
+      : (state?.orders ?? [])
+    if (groups.length === 0) return
+    if (groups.some(groupHasPayment)) return // buton zaten devre dışı — savunma amaçlı ikinci kontrol
+    const items = groups.flatMap(g => g.items)
+    const itemCount = items.reduce((s, i) => s + i.qty, 0)
+    const total = groupSubtotal(items)
+    const tableName = tableDefs.find(t => t.id === tableId)?.name ?? ''
+    setCancelTarget({
+      tableId,
+      scopeGroupLocalId,
+      tableName,
+      itemCount,
+      total,
+      groupLabel: scopeGroupLocalId ? (groups[0]?.label ?? null) : null,
+    })
+  }
+
+  const handleCancelTable = async () => {
+    if (!cancelTarget || cancelling) return
+    const { tableId, scopeGroupLocalId } = cancelTarget
+    setCancelling(true)
+    try {
+      const state = runtimeStates[tableId]
+      const groups = scopeGroupLocalId
+        ? (state?.orders ?? []).filter(o => o.localId === scopeGroupLocalId)
+        : (state?.orders ?? [])
+      // Savunma amaçlı yeniden kontrol: onay ekranı açıkken başka bir
+      // cihazdan ödeme gelmiş olabilir — masayı sil-öncesi son kez doğrula.
+      if (groups.length === 0 || groups.some(groupHasPayment)) {
+        setCancelTarget(null)
+        return
+      }
+
+      // Kalıcı db kaydı — handleRemoveItem ile aynı kural: hiç
+      // kalıcılaştırılmamış (persistedOrderId yok) bir grup zaten sadece
+      // runtime'da yaşıyor, silinecek db satırı yok. Kalıcılaşmış ama hiç bu
+      // cihazdan çıkmamış (supabaseOrderId yok) bir grup güvenle sert
+      // silinebilir (deleteActiveOrderCascade) — uzlaştırılacak uzak kayıt
+      // yok. Uzağa ulaşmış (supabaseOrderId var) bir grup ASLA sert
+      // silinmez — setOrderStatus ile 'cancelled' işaretlenir ki senkron bir
+      // sonraki turda uzak tarafı da kapatsın, sipariş geri dirilmesin.
+      for (const g of groups) {
+        if (!g.persistedOrderId) continue
+        try {
+          if (g.supabaseOrderId == null) {
+            await deleteActiveOrderCascade(g.persistedOrderId)
+          } else {
+            await setOrderStatus(g.persistedOrderId, 'cancelled')
+          }
+        } catch (e) {
+          console.warn('[Tables] masa iptal — kalıcı sipariş temizlenemedi', e)
+        }
+      }
+
+      setRuntimeStates(prev => {
+        const existing = prev[tableId]
+        if (!existing) return prev
+        const cancelledIds = new Set(groups.map(g => g.localId))
+        const newOrders = (existing.orders ?? []).filter(o => !cancelledIds.has(o.localId))
+        if (newOrders.length === 0) {
+          const next = { ...prev }
+          delete next[tableId]
+          return next
+        }
+        return { ...prev, [tableId]: { ...existing, orders: newOrders } }
+      })
+
+      if (!scopeGroupLocalId) setSelectedTableId(null)
+
+      // Uzak taraf: QR/senkron olmuş siparişleri 'cancelled' işaretle, hiç
+      // aktif sipariş kalmadıysa masayı serbest bırak — handleQRReject'teki
+      // desenin aynısı.
+      if (isSupabaseReady) {
+        const remoteIds = [...new Set(groups.map(g => g.supabaseOrderId).filter(id => id != null).map(Number))]
+        for (const rid of remoteIds) {
+          try { await supabase.from('orders').update({ status: 'cancelled' }).eq('id', rid) }
+          catch (e) { console.warn('[Tables] masa iptal — uzak sipariş güncellenemedi', e) }
+        }
+        try {
+          const { data: rem } = await supabase.from('orders').select('id').eq('table_id', tableId).eq('status', 'active').limit(1)
+          if (!rem?.length) await supabase.from('tables').update({ status: 'empty' }).eq('id', tableId)
+        } catch (e) { console.warn('[Tables] masa durumu güncellenemedi', e) }
+      }
+      if (isOnline) triggerSync()
+    } finally {
+      setCancelling(false)
+      setCancelTarget(null)
+    }
   }
 
   // ── Payment / QR ────────────────────────────────────────────────
@@ -534,16 +692,43 @@ function Tables() {
   // orders in sql.js, records payments via addPayments and keeps the table
   // OPEN with the covered items marked paid. The table/group only closes
   // once everything is paid.
+  // FIX 3 — çift-gönderim kilidi: aynı masa için bir ödeme işlemi sürerken
+  // ikinci bir çağrı (hızlı çift tık, ya da modal kapanmadığı için kasiyerin
+  // "Tahsil Et"e tekrar basması) hiçbir şey yapmadan döner. Ref senkron
+  // kontrol sağlıyor — React state güncellemesinin render'a yansımasını
+  // beklemez, aynı olay döngüsü turunda bile ikinci çağrıyı yakalar.
+  // PaymentModal'ın kendi completedRef'inden BAĞIMSIZ, ayrı bir kilit —
+  // öyle istendi çünkü completedRef yalnızca tek bir modal örneğini korur,
+  // bu ise masa kimliğine göre çalışır ve gerçek işi yapan bu fonksiyonun
+  // kendisini korur.
   const applyPaymentTx = async (transactionData, scopeGroupLocalId) => {
+    const tableId = transactionData.tableId
+    if (payingTableIdsRef.current.has(tableId)) return
+    payingTableIdsRef.current.add(tableId)
+    setPayingTableIds(new Set(payingTableIdsRef.current))
+    setPaymentError(null)
+    try {
+      await applyPaymentTxInner(transactionData, scopeGroupLocalId)
+    } finally {
+      payingTableIdsRef.current.delete(tableId)
+      setPayingTableIds(new Set(payingTableIdsRef.current))
+    }
+  }
+
+  // Asıl ödeme mantığı — matematik, bölüşüm ve işlem sırası DEĞİŞMEDİ; tek
+  // fark, ödeme modalının artık işlem gerçekten başarılı olmadan
+  // kapatılmaması ve başarısızlıkta kasiyere görünür bir Türkçe hata
+  // gösterilmesi (FIX 3). Önceden en tepede koşulsuz kapatılıyordu — bu da
+  // kasiyerin "başarısız oldu" sanıp aynı tutarı ikinci kez tahsil etmesine
+  // yol açıyordu (özellikle materialized yolda: addPayments para kaydını
+  // ödeme satırını EN BAŞTA yazıyor, sonraki adımlar yine de patlayabiliyordu).
+  const applyPaymentTxInner = async (transactionData, scopeGroupLocalId) => {
     const tableId = transactionData.tableId
     const state = runtimeStates[tableId]
     const groups = scopeGroupLocalId
       ? (state?.orders ?? []).filter(o => o.localId === scopeGroupLocalId)
       : (state?.orders ?? [])
     const hasPersisted = groups.some(g => g.persistedOrderId)
-
-    setPaymentTable(null)
-    setPaymentOrder(null)
 
     if (transactionData.isFullPayment && !hasPersisted) {
       // ── Fast path ──
@@ -633,15 +818,23 @@ function Tables() {
           } catch (e) { console.warn('[Tables] masa durumu güncellenemedi', e) }
         }
         if (isOnline) triggerSync()
+
+        // İşlem gerçekten başarılı oldu — ödeme modalını ancak şimdi kapat.
+        setPaymentTable(null)
+        setPaymentOrder(null)
       } catch (e) {
         console.error('[Tables] Failed to save order to DB', e)
+        setPaymentError({
+          tableId,
+          message: 'Ödeme kaydedilemedi — bağlantı ya da veritabanı hatası oluştu. Tekrar "Tahsil Et"e basmadan önce masayı ve Siparişler sayfasını kontrol edin; aynı tutar iki kez alınabilir.',
+        })
       }
       return
     }
 
     // ── Materialized path (partial payment, or closing an order that already
     //    has partial payments) ──
-    if (groups.length === 0) return
+    if (groups.length === 0) { setPaymentTable(null); setPaymentOrder(null); return }
     try {
       const discount = transactionData.discount ?? 0
 
@@ -844,8 +1037,16 @@ function Tables() {
         } catch (e) { console.warn('[Tables] masa durumu güncellenemedi', e) }
       }
       if (isOnline) triggerSync()
+
+      // İşlem gerçekten başarılı oldu — ödeme modalını ancak şimdi kapat.
+      setPaymentTable(null)
+      setPaymentOrder(null)
     } catch (e) {
       console.error('[Tables] Failed to record payment', e)
+      setPaymentError({
+        tableId,
+        message: 'Ödeme işlenirken hata oluştu. Tutar kısmen kaydedilmiş olabilir — tekrar tahsil etmeden önce masayı ve Siparişler sayfasını kontrol edin, aynı tutarı iki kez almayın.',
+      })
     }
   }
 
@@ -1050,6 +1251,7 @@ function Tables() {
           onMoveWholeTable={handleMoveWholeTable}
           onMoveItemsToTable={handleMoveItemsToTable}
           onSetDiscount={handleSetDiscount}
+          onCancelTable={requestCancelTable}
           onPayOrder={(tableId, subOrderLocalId) => {
             const tbl = displayTables.find(t => t.id === tableId)
             const order = (runtimeStates[tableId]?.orders ?? []).find(o => o.localId === subOrderLocalId)
@@ -1063,7 +1265,9 @@ function Tables() {
           table={displayTables.find(t => t.id === paymentOrder.tableId) ?? {}}
           partialOrder={paymentOrder}
           alreadyPaid={paymentOrder.paidAmount ?? 0}
-          onClose={() => setPaymentOrder(null)}
+          submitting={payingTableIds.has(paymentOrder.tableId)}
+          errorMessage={paymentError?.tableId === paymentOrder.tableId ? paymentError.message : null}
+          onClose={() => { setPaymentOrder(null); setPaymentError(null) }}
           onComplete={handlePartialPaymentComplete}
           onSetDiscount={handleSetDiscount}
         />
@@ -1073,11 +1277,38 @@ function Tables() {
         <PaymentModal
           table={paymentTable}
           alreadyPaid={(paymentTable.orders ?? []).reduce((s, o) => s + (o.paidAmount || 0), 0)}
-          onClose={() => setPaymentTable(null)}
+          submitting={payingTableIds.has(paymentTable.id)}
+          errorMessage={paymentError?.tableId === paymentTable.id ? paymentError.message : null}
+          onClose={() => { setPaymentTable(null); setPaymentError(null) }}
           onComplete={handlePaymentComplete}
           onSetDiscount={handleSetDiscount}
         />
       )}
+
+      {/* Masayı İptal Et — onay */}
+      <ConfirmModal
+        open={!!cancelTarget}
+        title="Masayı iptal et"
+        danger
+        confirmText={cancelling ? 'İptal ediliyor…' : 'Evet, iptal et'}
+        cancelText="Vazgeç"
+        onCancel={() => !cancelling && setCancelTarget(null)}
+        onConfirm={handleCancelTable}
+        message={cancelTarget && (
+          <div className="tables-endday-body">
+            <p>
+              {cancelTarget.scopeGroupLocalId ? (
+                <><strong>{cancelTarget.tableName}</strong> masasındaki <strong>{cancelTarget.groupLabel ?? 'seçili sipariş'}</strong> grubu iptal edilecek.</>
+              ) : (
+                <><strong>{cancelTarget.tableName}</strong> masasındaki <strong>tüm siparişler</strong> iptal edilecek.</>
+              )}
+            </p>
+            <p className="tables-endday-meta">
+              {cancelTarget.itemCount} ürün · ₺{cancelTarget.total.toLocaleString('tr-TR', { minimumFractionDigits: 2 })} tutarındaki sipariş silinecek. Bu işlem geri alınamaz.
+            </p>
+          </div>
+        )}
+      />
 
       {/* Günü bitirme onayı */}
       <ConfirmModal

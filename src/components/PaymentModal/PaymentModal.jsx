@@ -68,7 +68,15 @@ function MethodPicker({ value, onChange }) {
   )
 }
 
-function PaymentModal({ table, partialOrder, alreadyPaid = 0, onClose, onComplete, onSetDiscount }) {
+function PaymentModal({
+  table, partialOrder, alreadyPaid = 0, onClose, onComplete, onSetDiscount,
+  // FIX 3 — Tables.jsx'in masa bazlı çift-gönderim kilidi ve son işlemden
+  // kalan görünür hata mesajı. completedRef'ten BAĞIMSIZ, dışarıdan gelen
+  // ikinci bir kilit katmanı: completedRef yalnızca bu modal örneğini aynı
+  // olay döngüsü turunda korur, submitting ise gerçek işlemin süren
+  // durumunu (Tables.jsx applyPaymentTx) yansıtır.
+  submitting = false, errorMessage = null,
+}) {
   const { pointRate, currentUser } = useApp()
   const canDiscount = hasPerm(currentUser, 'apply_discount')
   const [mode, setMode] = useState('single')
@@ -398,11 +406,17 @@ function PaymentModal({ table, partialOrder, alreadyPaid = 0, onClose, onComplet
   const removeItemPart = (id) => setItemParts(prev => prev.filter(p => p.id !== id))
   const clearSelection = () => { setItemSel(new Map()); setItemParts([]) }
 
-  // A double-click on "Tahsil Et" must not record the payment twice —
-  // the modal unmounts right after the first call, no reset needed.
+  // A double-click on "Tahsil Et" must not record the payment twice.
+  // FIX 3: the modal no longer always unmounts right after the call — on
+  // failure it stays open with errorMessage set, so completedRef must be
+  // released then, otherwise the button would stay permanently disabled
+  // and the cashier could never retry.
   const completedRef = useRef(false)
+  useEffect(() => {
+    if (errorMessage) completedRef.current = false
+  }, [errorMessage])
   const handleComplete = async () => {
-    if (!canComplete || completedRef.current) return
+    if (!canComplete || completedRef.current || submitting) return
     completedRef.current = true
 
     // Redeeming points: deduct from the member's balance FIRST, with an
@@ -570,7 +584,7 @@ function PaymentModal({ table, partialOrder, alreadyPaid = 0, onClose, onComplet
   }
 
   return (
-    <div className="pm-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+    <div className="pm-overlay" onClick={(e) => !submitting && e.target === e.currentTarget && onClose()}>
       <div className="pm-modal">
 
         {/* ── Header ── */}
@@ -591,7 +605,12 @@ function PaymentModal({ table, partialOrder, alreadyPaid = 0, onClose, onComplet
               </p>
             </div>
           </div>
-          <button className="pm-header__close" onClick={onClose}>✕</button>
+          <button
+            className="pm-header__close"
+            onClick={onClose}
+            disabled={submitting}
+            title={submitting ? 'Ödeme işleniyor — lütfen bekleyin' : undefined}
+          >✕</button>
         </div>
 
         {/* ── Body ── */}
@@ -956,6 +975,15 @@ function PaymentModal({ table, partialOrder, alreadyPaid = 0, onClose, onComplet
               </div>
             )}
 
+            {/* FIX 3 — başarısız ödeme artık görünür: modal kapanmıyor, kasiyer
+                bu mesajı görmeden tekrar tahsil edemez sanmıyor. */}
+            {errorMessage && (
+              <div className="pm-error-banner">
+                <strong>Ödeme tamamlanamadı</strong>
+                <span>{errorMessage}</span>
+              </div>
+            )}
+
             {/* Commit summary */}
             <div className="pm-commit-summary">
               <span>TAHSİL EDİLECEK</span>
@@ -965,11 +993,11 @@ function PaymentModal({ table, partialOrder, alreadyPaid = 0, onClose, onComplet
             </div>
 
             <button
-              className={`pm-complete-btn ${!canComplete ? 'pm-complete-btn--disabled' : ''}`}
+              className={`pm-complete-btn ${(!canComplete || submitting) ? 'pm-complete-btn--disabled' : ''}`}
               onClick={handleComplete}
-              disabled={!canComplete}
+              disabled={!canComplete || submitting}
             >
-              {isFullPayment ? 'Tahsil & Kapat' : 'Tahsil Et'}
+              {submitting ? 'İşleniyor…' : (isFullPayment ? 'Tahsil & Kapat' : 'Tahsil Et')}
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                 <line x1="5" y1="12" x2="19" y2="12" />
                 <polyline points="12 5 19 12 12 19" />

@@ -76,14 +76,21 @@ const CATEGORY_ICONS = {
 }
 
 // ── Main component ────────────────────────────────────────────────
+// Bir grubun herhangi bir kısmı tahsil edilmiş mi? Para kaydı olan hiçbir
+// grup/masa iptal edilemez — bkz. Tables.jsx requestCancelTable/handleCancelTable.
+function groupHasPayment(g) {
+  return (g?.paidAmount ?? 0) > 0 || (g?.items ?? []).some(i => i.paid)
+}
+
 function OrderPanel({
   table, tables = [],
   onClose, onCloseTable, onAddItem, onUpdateNote, onRemoveItem,
-  onPayOrder, onNewGroup, onMoveWholeTable, onMoveItemsToTable, onSetDiscount,
+  onPayOrder, onNewGroup, onMoveWholeTable, onMoveItemsToTable, onSetDiscount, onCancelTable,
 }) {
   const { products, categories, productVariants, currentUser } = useApp()
   const canDiscount = hasPerm(currentUser, 'apply_discount')
   const canClose    = hasPerm(currentUser, 'close_table')
+  const canCancel   = hasPerm(currentUser, 'cancel_order')
   const [search,               setSearch]               = useState('')
   const [activeCatId,          setActiveCatId]          = useState(null)
   const [pickerView,           setPickerView]           = useState('categories')
@@ -108,6 +115,9 @@ function OrderPanel({
   const isOccupied = orderItems.length > 0
   // Primary manual order group (first one without supabaseOrderId, or first overall)
   const primaryGroup = orders.find(o => o.supabaseOrderId == null) ?? orders[0]
+  // "Masayı İptal Et" güvenlik kilidi: masada HERHANGİ bir kayıtlı ödeme
+  // varsa (tam masa iptalinde) hiç iptal edilemez — para kaydını yok etmemek için.
+  const tableHasPayment = orders.some(groupHasPayment)
 
   // ── Receipt printing (thermal printer, via the shared PrintButton) ──
   // Sipariş No prefers the real persisted order id (Supabase or offline
@@ -444,6 +454,12 @@ function OrderPanel({
                             className="om-order-group__pay-btn"
                             onClick={() => onPayOrder(table.id, order.localId)}
                           >Öde</button>}
+                          {canCancel && <button
+                            className="om-order-group__cancel-btn"
+                            disabled={groupHasPayment(order)}
+                            title={groupHasPayment(order) ? 'Bu grupta tahsil edilmiş ödeme var — iptal edilemez' : 'Bu siparişi iptal et'}
+                            onClick={() => onCancelTable?.(table.id, order.localId)}
+                          >İptal</button>}
                         </div>
                       )}
                       {selectionMode
@@ -468,6 +484,24 @@ function OrderPanel({
                   <span>Ara Toplam</span>
                   <span>₺{subtotal.toLocaleString('tr-TR', { minimumFractionDigits: 2 })}</span>
                 </div>
+                {/* FIX 2: ürün kaldırılınca indirim ara toplamı aşamayacak
+                    şekilde otomatik küçültüldüyse kasiyere görünür olsun —
+                    sessizce farklı bir indirim uygulanmış olmasın. */}
+                {table.discountClampNotice && (
+                  <div className="om-totals__clamp-note">
+                    <span>
+                      İndirim, ürün kaldırıldığı için ₺{table.discountClampNotice.from.toLocaleString('tr-TR', { minimumFractionDigits: 2 })}
+                      {table.discountClampNotice.to > 0
+                        ? ` yerine ₺${table.discountClampNotice.to.toLocaleString('tr-TR', { minimumFractionDigits: 2 })} olarak uygulandı.`
+                        : ' tamamen kaldırıldı — kalan tutar indirimden düşük.'}
+                    </span>
+                    <button
+                      className="om-totals__clamp-note-dismiss"
+                      title="Bildirimi kapat"
+                      onClick={() => onSetDiscount?.(table.id, table.discount ?? null)}
+                    >✕</button>
+                  </div>
+                )}
                 {discount > 0 && !discountEditorOpen && (
                   <div className="om-totals__row om-totals__row--discount">
                     <button
@@ -547,6 +581,21 @@ function OrderPanel({
                       </svg>
                       Ürün Taşı
                     </button>
+                    {canCancel && (
+                      <button
+                        className="om-secondary-btn om-secondary-btn--danger"
+                        disabled={tableHasPayment}
+                        title={tableHasPayment
+                          ? 'Bu masada tahsil edilmiş ödeme var — masa iptal edilemez'
+                          : 'Masadaki tüm siparişleri iptal et'}
+                        onClick={() => onCancelTable?.(table.id, null)}
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                        </svg>
+                        Masayı İptal Et
+                      </button>
+                    )}
                   </div>
                 )}
 

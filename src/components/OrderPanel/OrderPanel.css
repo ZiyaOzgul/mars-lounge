@@ -218,6 +218,38 @@
   padding: 2px 0;
 }
 .om-totals__add-discount:hover { text-decoration: underline; }
+
+/* FIX 2 — indirim, ürün kaldırıldığı için otomatik küçültüldüğünde kasiyeri
+   uyaran satır. Uyarı rengi (warning) kullanılıyor: hata değil, bilgilendirme. */
+.om-totals__clamp-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 8px;
+  margin-bottom: 4px;
+  background: var(--color-warning-light);
+  border-radius: var(--radius-input);
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--color-warning);
+}
+
+.om-totals__clamp-note-dismiss {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--color-warning);
+  border-radius: 50%;
+}
+
+.om-totals__clamp-note-dismiss:hover {
+  background: rgba(0, 0, 0, 0.06);
+}
 .om-totals__row--total {
   font-size: 15px;
   color: var(--color-text-primary);
@@ -443,6 +475,31 @@
 
 .om-order-group__pay-btn:hover {
   background: #16a34a;
+}
+
+/* Grup bazlı "İptal" — Öde'nin yanında, tahsilat kaydı varsa devre dışı */
+.om-order-group__cancel-btn {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 12px;
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--color-danger);
+  border: 1px solid var(--color-danger-light);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.om-order-group__cancel-btn:hover {
+  background: var(--color-danger-light);
+  border-color: var(--color-danger);
+}
+
+.om-order-group__cancel-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  color: var(--color-text-muted);
+  border-color: var(--color-border);
 }
 
 .om-order-group .om-item {
@@ -715,6 +772,26 @@
 .om-secondary-btn:hover {
   background: var(--color-bg-card, #fff);
   border-color: var(--color-accent, #e8975a);
+}
+
+/* "Masayı İptal Et" — yıkıcı işlem, diğer ikincil butonlardan renkle ayrılır */
+.om-secondary-btn--danger {
+  color: var(--color-danger);
+  border-color: var(--color-danger-light);
+}
+
+.om-secondary-btn--danger:hover {
+  background: var(--color-danger-light);
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+
+.om-secondary-btn--danger:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  color: var(--color-text-secondary);
+  border-color: var(--color-border);
+  background: var(--color-bg-page);
 }
 
 /* ── Selection-mode bottom bar ────────────────────────────────────── */

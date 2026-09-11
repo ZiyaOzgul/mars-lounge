@@ -106,6 +106,69 @@ function createWindow() {
     }
   })
 
+  // ── Renderer crash recovery ───────────────────────────────────────
+  // Bu PC hiç yeniden başlatılmıyor — uygulama günlerce açık kalıyor. Uzun
+  // süre çalışan bir Electron uygulamasında en klasik arıza şekli, Chromium
+  // renderer sürecinin (OOM, GPU çökmesi vb. sebeplerle) tamamen ölmesidir.
+  // Bu durumda pencere beyaz/boş kalır ve JS seviyesindeki hiçbir koruma
+  // (ErrorBoundary dahil) devreye giremez, çünkü JS context'in kendisi ölmüş
+  // olur. Otomatik olarak reload ederek toparlanmayı deniyoruz, ama art arda
+  // çöküyorsa (crash loop) sonsuza kadar reload etmeye devam etmiyoruz.
+  const CRASH_LOOP_WINDOW_MS = 5 * 60 * 1000
+  const CRASH_LOOP_MAX = 3
+  let recoveryTimestamps = []
+
+  win.webContents.on('render-process-gone', (event, details) => {
+    const now = Date.now()
+    console.error(
+      `[${new Date(now).toISOString()}] [render-process-gone] renderer çöktü — reason: ${details.reason}, exitCode: ${details.exitCode}`
+    )
+
+    recoveryTimestamps = recoveryTimestamps.filter((t) => now - t < CRASH_LOOP_WINDOW_MS)
+
+    if (recoveryTimestamps.length >= CRASH_LOOP_MAX) {
+      console.error(
+        `[${new Date().toISOString()}] [render-process-gone] son ${CRASH_LOOP_WINDOW_MS / 60000} dakika içinde ${CRASH_LOOP_MAX}'ten fazla çöküş oldu — crash loop koruması devrede, otomatik yeniden yükleme durduruldu`
+      )
+      return
+    }
+
+    recoveryTimestamps.push(now)
+    console.error(`[${new Date().toISOString()}] [render-process-gone] pencere otomatik olarak yeniden yükleniyor`)
+    try {
+      win.reload()
+    } catch (err) {
+      console.error('[render-process-gone] reload başarısız:', err)
+    }
+  })
+
+  // Unresponsive genelde kendiliğinden düzelir (uzun senkron bir işlem
+  // sürüyor olabilir) — burada zorla reload/kill YAPMIYORUZ, çünkü bu
+  // kaydedilmemiş bir işlemi yok edebilir. Sadece logluyoruz; responsive
+  // ile birlikte süresi loglardan görülebilir.
+  win.on('unresponsive', () => {
+    console.error(`[${new Date().toISOString()}] [unresponsive] pencere yanıt vermiyor — otomatik müdahale yapılmıyor`)
+  })
+
+  win.on('responsive', () => {
+    console.error(`[${new Date().toISOString()}] [responsive] pencere tekrar yanıt veriyor`)
+  })
+
+  // ── Gece bakım reload'u (05:00) ────────────────────────────────────
+  // Kök sorun sürecin hiç yeniden başlatılmamasıdır. Günde bir kez, güvenli
+  // olduğunda kontrollü bir reload yapıyoruz. Main, kasiyerin sipariş
+  // ortasında olup olmadığını bilemez — bu yüzden karar vermek yerine
+  // renderer'a soruyor ve sadece açık onay gelirse reload ediyor.
+  scheduleMaintenanceReload(win, msUntilNextMaintenance())
+
+  // ── Periyodik renderer bellek loglaması ────────────────────────────
+  // Tanı amaçlı: günler içinde bellek büyümesinin renderer çökmesine sebep
+  // olup olmadığını (render-process-gone yukarıda) bir sonraki olayda teyit
+  // ya da çürütmek için kullanılır.
+  const memoryTimer = setInterval(() => logRendererMemory(win), MEMORY_LOG_INTERVAL_MS)
+  win.once('closed', () => clearInterval(memoryTimer))
+  logRendererMemory(win) // başlangıç değeri de loglansın
+
   // En yaygın kapatma yolu (pencerenin X butonu) 'window-all-closed' →
   // app.quit() → 'before-quit' zincirini tetikler, ama o noktada pencere
   // zaten yok edilmiş olur ve renderer'a flush isteği gönderilemez. Bu yüzden
@@ -124,6 +187,98 @@ function createWindow() {
       win.close()
     })
   })
+}
+
+// ── Gece bakım reload'u — yardımcı fonksiyonlar ─────────────────────
+// Her gün yerel saatle 05:00'te bir kez tetiklenir. Naif bir 24 saatlik
+// setInterval yerine, bir sonraki 05:00'e kalan süreyi hesaplayıp her
+// tetiklemeden sonra yeniden kuruyoruz — böylece saat kayması (drift) veya
+// DST geçişleri birikmiyor.
+const MAINTENANCE_HOUR = 5
+const MAINTENANCE_APPROVAL_TIMEOUT_MS = 60 * 1000
+const MAINTENANCE_RETRY_MS = 30 * 60 * 1000
+// Onay alinamazsa sadece bu saat araliginda tekrar denenir (05:00-07:00).
+const MAINTENANCE_WINDOW_HOURS = 2
+
+function msUntilNextMaintenance() {
+  const now = new Date()
+  const next = new Date(now.getFullYear(), now.getMonth(), now.getDate(), MAINTENANCE_HOUR, 0, 0, 0)
+  if (next <= now) next.setDate(next.getDate() + 1)
+  return next.getTime() - now.getTime()
+}
+
+function scheduleMaintenanceReload(win, delayMs) {
+  setTimeout(() => requestMaintenanceReload(win), delayMs)
+}
+
+// Main, kasiyerin sipariş ortasında olup olmadığını bilemez — bu yüzden
+// asla kendiliğinden reload etmez. Renderer'a sorar ve sadece açık onay
+// ('maintenance-reload-approved') gelirse reload eder. 60 saniye içinde
+// onay gelmezse bakım o gün için atlanır ve 30 dakika sonra tekrar denenir.
+function requestMaintenanceReload(win) {
+  if (!win || win.isDestroyed() || !win.webContents || win.webContents.isDestroyed()) {
+    scheduleMaintenanceReload(win, msUntilNextMaintenance())
+    return
+  }
+
+  // Bakim yalnizca sabahin erken saatlerinde yapilir. Onay alinamadiginda 30
+  // dakikada bir tekrar deniyoruz, ama bu pencere disina tasmamali: aksi
+  // halde gun ortasinda masalar bir an bosaldiginda servis sirasinda reload
+  // tetiklenebilirdi. Pencere kapandiysa yarina birakiyoruz.
+  const hour = new Date().getHours()
+  if (hour < MAINTENANCE_HOUR || hour >= MAINTENANCE_HOUR + MAINTENANCE_WINDOW_HOURS) {
+    console.log(`[${new Date().toISOString()}] [maintenance] bakim penceresi disinda (saat ${hour}) — yarin 0${MAINTENANCE_HOUR}:00'e erteleniyor`)
+    scheduleMaintenanceReload(win, msUntilNextMaintenance())
+    return
+  }
+
+  console.log(`[${new Date().toISOString()}] [maintenance] gece bakım reload'u isteniyor`)
+
+  let settled = false
+  const timer = setTimeout(() => {
+    if (settled) return
+    settled = true
+    ipcMain.removeAllListeners('maintenance-reload-approved')
+    console.log(`[${new Date().toISOString()}] [maintenance] onay alınamadı (60sn) — bakım bu sefer atlandı, 30 dk sonra tekrar denenecek`)
+    scheduleMaintenanceReload(win, MAINTENANCE_RETRY_MS)
+  }, MAINTENANCE_APPROVAL_TIMEOUT_MS)
+
+  ipcMain.once('maintenance-reload-approved', () => {
+    if (settled) return
+    settled = true
+    clearTimeout(timer)
+    console.log(`[${new Date().toISOString()}] [maintenance] onaylandı — pencere yeniden yükleniyor`)
+    try {
+      win.reload()
+    } catch (err) {
+      console.error('[maintenance] reload başarısız:', err)
+    }
+    scheduleMaintenanceReload(win, msUntilNextMaintenance())
+  })
+
+  try {
+    win.webContents.send('maintenance-reload-request')
+  } catch (err) {
+    console.error('[maintenance] istek renderer’a gönderilemedi:', err)
+    settled = true
+    clearTimeout(timer)
+    ipcMain.removeAllListeners('maintenance-reload-approved')
+    scheduleMaintenanceReload(win, msUntilNextMaintenance())
+  }
+}
+
+// ── Periyodik renderer bellek loglaması — yardımcı fonksiyon ────────
+const MEMORY_LOG_INTERVAL_MS = 15 * 60 * 1000
+
+function logRendererMemory(win) {
+  if (!win || win.isDestroyed() || !win.webContents || win.webContents.isDestroyed()) return
+  win.webContents.getProcessMemoryInfo()
+    .then((info) => {
+      console.log(`[${new Date().toISOString()}] [memory] renderer — residentSet: ${info.residentSet}KB, private: ${info.private}KB`)
+    })
+    .catch((err) => {
+      console.error('[memory] renderer bellek bilgisi okunamadı:', err)
+    })
 }
 
 ipcMain.on('get-user-data-path', (event) => {
@@ -162,31 +317,49 @@ ipcMain.handle('db-read-backup', () => {
   }
 })
 
+// Dönüş değeri renderer'ın (localDb.js persistDb) başarı/başarısızlığı
+// ayırt edebilmesi için bir sonuç nesnesidir: { ok: true } | { ok: true,
+// backupFailed: true } | { ok: false, error: string }. Eskiden bu handler
+// hatayı yutup undefined döndürüyordu — disk dolu/dosya kilidi/antivirüs gibi
+// bir sebeple yazma başarısız olduğunda uygulama normal görünmeye devam
+// ediyor ama hiçbir şey diske ulaşmıyordu. Şimdi sonuç her zaman gözlenebilir.
 ipcMain.handle('db-write', (event, data) => {
-  try {
-    const dbFile  = DB_FILE()
-    const tmpFile = DB_TMP_FILE()
-    const bakFile = DB_BAK_FILE()
+  const dbFile  = DB_FILE()
+  const tmpFile = DB_TMP_FILE()
+  const bakFile = DB_BAK_FILE()
 
+  try {
     // 1) Write the new bytes to a scratch file first — if this fails or is
     //    interrupted, the live db file is never touched.
     fs.writeFileSync(tmpFile, Buffer.from(data))
 
     // 2) Roll the current live file into .bak *before* replacing it, so
-    //    there is always one previous generation to recover from.
+    //    there is always one previous generation to recover from. A .bak
+    //    failure here is NOT a write failure — the actual live write below
+    //    is what matters for data safety — so it's surfaced separately via
+    //    backupFailed rather than making the whole call fail.
+    let backupFailed = false
     try {
       const stat = fs.statSync(dbFile)
       if (stat.size > 0) fs.copyFileSync(dbFile, bakFile)
-    } catch {
-      // No existing file yet (first run) — nothing to back up.
+    } catch (bakErr) {
+      if (bakErr && bakErr.code === 'ENOENT') {
+        // No existing file yet (first run) — nothing to back up, not a failure.
+      } else {
+        backupFailed = true
+        console.error('[db-write] UYARI: .bak kopyası oluşturulamadı (ana yazma etkilenmedi):', bakErr)
+      }
     }
 
     // 3) Same-volume rename is atomic on NTFS/Windows — the live file either
     //    stays as the previous generation or becomes the new one in full,
     //    never a partial write.
     fs.renameSync(tmpFile, dbFile)
+
+    return backupFailed ? { ok: true, backupFailed: true } : { ok: true }
   } catch (err) {
     console.error('[db-write] KRİTİK: veritabanı dosyası diske yazılamadı:', err)
+    return { ok: false, error: String((err && err.message) || err) }
   }
 })
 

@@ -41,6 +41,30 @@ export function isDbInitialized() { return db !== null }
 let dbInitWarning = null
 export function getDbInitWarning() { return dbInitWarning }
 
+// Set whenever a disk write from persistDb() fails (disk full, file lock,
+// antivirus/OneDrive lock, …). Until this was tracked, a failing write was
+// completely invisible — the app kept running normally while nothing
+// reached disk, and everything since the last successful write was lost on
+// the next crash/restart. persistDb() is called from dozens of write paths
+// and is not React-aware, so state changes are pushed to a single
+// module-level subscriber (registered by AppContext on mount) instead of a
+// full event bus. Cleared automatically on the next successful write.
+let dbWriteFailure = null
+export function getDbWriteFailure() { return dbWriteFailure }
+
+let dbWriteFailureListener = null
+// AppContext calls this once on mount. Returns an unsubscribe function.
+export function onDbWriteFailureChange(listener) {
+  dbWriteFailureListener = listener
+  return () => { if (dbWriteFailureListener === listener) dbWriteFailureListener = null }
+}
+
+function setDbWriteFailure(next) {
+  if (dbWriteFailure === next) return
+  dbWriteFailure = next
+  dbWriteFailureListener?.(next)
+}
+
 // ── Seed data (inserted once on first run) ────────────────────────
 // Masa sayısı. Supabase'deki public.tables ile AYNI id aralığını (1..N)
 // kaplamak zorunda: siparişler table_id'yi olduğu gibi Supabase'e gönderiyor,
@@ -492,10 +516,25 @@ export async function initDb() {
 }
 
 // ── Persist to disk ───────────────────────────────────────────────
+// Called on every write, many of them on hot paths — never add retries,
+// delays, or other work here that would slow it down. Detect and report
+// the result only.
 export async function persistDb() {
   if (!db || !window.electronAPI?.db?.write) return
   const data = db.export()
-  await window.electronAPI.db.write(data)
+  const result = await window.electronAPI.db.write(data)
+  if (result?.ok === false) {
+    const message = result.error || 'Bilinmeyen hata'
+    console.error('[localDb] KRİTİK: veritabanı diske yazılamadı — girilen veriler kayıt altına alınmıyor:', message)
+    setDbWriteFailure({ message, timestamp: Date.now() })
+    return
+  }
+  if (result?.backupFailed) {
+    // Main write succeeded — the real data is safe on disk. Only the rolling
+    // .bak copy failed, which is low severity: log it, don't alarm the operator.
+    console.warn('[localDb] Yedek (.bak) dosyası yazılamadı — ana veritabanı yazımı başarılı, veri güvende')
+  }
+  setDbWriteFailure(null)
 }
 
 // ── table_defs (LOCAL ONLY) ───────────────────────────────────────

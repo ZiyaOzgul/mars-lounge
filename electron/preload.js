@@ -33,5 +33,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
       return () => ipcRenderer.removeListener('flush-before-quit', handler)
     },
     ackFlushBeforeQuit: () => ipcRenderer.send('flush-before-quit-ack'),
+    // Main, günde bir kez (05:00) bakım reload'u yapmak istediğinde bunu
+    // gönderir. Main kasiyerin sipariş ortasında olup olmadığını bilemez —
+    // renderer güvenli olduğuna karar verirse approveMaintenanceReload()
+    // ile onay verir; aksi halde main 60sn sonra vazgeçer ve bakımı atlar.
+    onMaintenanceReloadRequest: (callback) => {
+      const handler = () => callback()
+      ipcRenderer.on('maintenance-reload-request', handler)
+      return () => ipcRenderer.removeListener('maintenance-reload-request', handler)
+    },
+    approveMaintenanceReload: () => ipcRenderer.send('maintenance-reload-approved'),
   },
 })
