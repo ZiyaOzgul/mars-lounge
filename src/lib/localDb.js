@@ -3272,6 +3272,31 @@ export function getCompletedOrderDetail(orderId) {
   }
 }
 
+// Payments already *settled* (settled_at set) on a closed order — i.e. a
+// veresiye debt that was physically collected after the order closed, days
+// or weeks later. Correction-mode reopen (below) permanently deletes every
+// payment row on the order, local + remote, so callers MUST show these to
+// the user and get explicit confirmation before invoking that path. See
+// reopenOperations.js / ReopenModal.jsx.
+export function getSettledPaymentsForOrder(orderId) {
+  requireDb()
+  const res = db.exec(
+    `SELECT amount, payment_method, payer_label, settled_at, settled_method
+     FROM payments
+     WHERE order_id = ? AND settled_at IS NOT NULL
+     ORDER BY settled_at`,
+    [orderId]
+  )
+  if (!res.length) return []
+  return res[0].values.map(([amount, paymentMethod, payerLabel, settledAt, settledMethod]) => ({
+    amount,
+    paymentMethod,
+    payerLabel: payerLabel || null,
+    settledAt,
+    settledMethod: settledMethod || null,
+  }))
+}
+
 // Reopening for correction cancels the original order and undoes its
 // payments — tombstoning remote payments (if any) and clearing the local
 // payment rows so the order carries no stale collected amount.
@@ -3352,8 +3377,20 @@ export function getClosedOrders({ sinceIso = null, limit = 200 } = {}) {
     }
   }
 
+  // Flag orders carrying an already-settled veresiye/payment — reopening
+  // one for correction is destructive (see getSettledPaymentsForOrder), so
+  // the "Kapananlar" list and reopen dialog warn about it up front.
+  const settledRes = db.exec(
+    `SELECT DISTINCT order_id FROM payments WHERE order_id IN (${placeholders}) AND settled_at IS NOT NULL`,
+    orderIds
+  )
+  const settledOrderIds = new Set(
+    settledRes.length ? settledRes[0].values.map(([oid]) => oid) : []
+  )
+
   for (const o of orders) {
     o.items = itemsByOrder[o.id] || []
+    o.hasSettledPayment = settledOrderIds.has(o.id)
   }
   return orders
 }

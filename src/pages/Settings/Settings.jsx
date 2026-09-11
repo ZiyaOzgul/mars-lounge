@@ -3,7 +3,14 @@ import { useApp } from "../../context/AppContext.jsx";
 import useOnlineStatus from "../../hooks/useOnlineStatus.js";
 import ConfirmModal from "../../components/ConfirmModal/ConfirmModal.jsx";
 import { imageSrc } from "../../lib/imageSrc.js";
+import { getOfflineCredential } from "../../lib/localDb.js";
+import { verifyPassword } from "../../lib/offlineAuth.js";
 import "./Settings.css";
+
+// ── Danger-zone reset: typed confirmation words (deliberately different so
+// muscle memory from one reset can't carry over to the other) ────────────
+const LOCAL_RESET_PHRASE = "SIFIRLA";
+const ONLINE_RESET_PHRASE = "TUM VERILERI SIL";
 
 // ── Icons ────────────────────────────────────────────────────────
 const IconBriefcase = () => (
@@ -781,6 +788,7 @@ function Settings() {
     syncLogs,
     pointRate,
     setPointRatePersist,
+    currentUser,
   } = useApp();
   const { isOnline } = useOnlineStatus();
 
@@ -791,6 +799,9 @@ function Settings() {
   const [tableError, setTableError] = useState(null);
   const [resetModal, setResetModal] = useState(null); // null | 'choose' | 'local' | 'online'
   const [resetLoading, setResetLoading] = useState(false);
+  const [resetConfirmText, setResetConfirmText] = useState("");
+  const [resetPassword, setResetPassword] = useState("");
+  const [resetPasswordError, setResetPasswordError] = useState(null);
   const [catError, setCatError] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null); // { kind: 'table'|'category', id, name }
 
@@ -966,6 +977,62 @@ function Settings() {
         icon: cat.icon,
         imageUrl: imageUrl ?? null,
       });
+  };
+
+  // ── Danger-zone reset guards ────────────────────────────────────
+  // Reset is admin-only, regardless of the broader `settings` permission
+  // route guard that gets Settings itself rendered.
+  const isAdmin = currentUser?.role === "admin";
+
+  // Locally-stored PBKDF2 credential for the signed-in admin, if any (see
+  // Login.jsx's offline fallback). Looked up only while the local/online
+  // reset step is actually open — no need to hit the local db otherwise.
+  const resetCredential =
+    (resetModal === "local" || resetModal === "online") && currentUser?.email
+      ? getOfflineCredential(currentUser.email)
+      : null;
+  const resetPasswordRequired = !!resetCredential;
+
+  const localWordOk = resetConfirmText.trim() === LOCAL_RESET_PHRASE;
+  const onlineWordOk = resetConfirmText.trim() === ONLINE_RESET_PHRASE;
+  const resetPasswordOk = !resetPasswordRequired || resetPassword.length > 0;
+  const localConfirmDisabled = resetLoading || !localWordOk || !resetPasswordOk;
+  const onlineConfirmDisabled = resetLoading || !onlineWordOk || !resetPasswordOk;
+
+  const closeResetModal = () => {
+    setResetModal(null);
+    setResetConfirmText("");
+    setResetPassword("");
+    setResetPasswordError(null);
+    setResetLoading(false);
+  };
+
+  const handleConfirmReset = async (kind) => {
+    const expectedWord = kind === "local" ? LOCAL_RESET_PHRASE : ONLINE_RESET_PHRASE;
+    if (resetConfirmText.trim() !== expectedWord) return; // guards a disabled-button bypass
+    setResetPasswordError(null);
+    setResetLoading(true);
+    try {
+      if (resetCredential) {
+        let ok = false;
+        try {
+          ok = await verifyPassword(resetPassword, resetCredential);
+        } catch (err) {
+          setResetPasswordError(err?.message ?? "Şifre doğrulanamadı.");
+          return;
+        }
+        if (!ok) {
+          setResetPasswordError("Şifre hatalı.");
+          setResetPassword("");
+          return;
+        }
+      }
+      if (kind === "local") await resetAllData();
+      else await resetOnlineData();
+      closeResetModal();
+    } finally {
+      setResetLoading(false);
+    }
   };
 
   return (
@@ -1350,24 +1417,32 @@ function Settings() {
                 </span>
                 Tehlikeli Bölge
               </h2>
-              <div className="st-danger-row">
-                <div className="st-danger-row__text">
-                  <span className="st-danger-row__title">
-                    Tüm Verileri Sıfırla
-                  </span>
-                  <span className="st-danger-row__desc">
-                    Ürünler, kategoriler ve sipariş geçmişi kalıcı olarak
-                    silinir. Bu işlem geri alınamaz.
-                  </span>
+              {isAdmin ? (
+                <div className="st-danger-row">
+                  <div className="st-danger-row__text">
+                    <span className="st-danger-row__title">
+                      Tüm Verileri Sıfırla
+                    </span>
+                    <span className="st-danger-row__desc">
+                      Ürünler, kategoriler ve sipariş geçmişi kalıcı olarak
+                      silinir. Bu işlem geri alınamaz.
+                    </span>
+                  </div>
+                  <button
+                    className="st-danger-btn"
+                    onClick={() => setResetModal("choose")}
+                  >
+                    <IconTrash />
+                    Verileri Sıfırla
+                  </button>
                 </div>
-                <button
-                  className="st-danger-btn"
-                  onClick={() => setResetModal("choose")}
-                >
-                  <IconTrash />
-                  Verileri Sıfırla
-                </button>
-              </div>
+              ) : (
+                <p className="st-danger-admin-note">
+                  Bu işlem yalnızca <strong>yönetici (admin)</strong> hesabıyla
+                  kullanılabilir. Verileri sıfırlamak için bir yönetici
+                  hesabıyla giriş yapın.
+                </p>
+              )}
             </div>
           </div>
         </div>
@@ -1393,10 +1468,10 @@ function Settings() {
       )}
 
       {/* ── Reset Data Modal ─────────────────────────────────── */}
-      {resetModal && (
+      {resetModal && isAdmin && (
         <div
           className="st-reset-overlay"
-          onClick={() => !resetLoading && setResetModal(null)}
+          onClick={() => !resetLoading && closeResetModal()}
         >
           <div className="st-reset-modal" onClick={(e) => e.stopPropagation()}>
             {resetModal === "choose" && (
@@ -1461,7 +1536,7 @@ function Settings() {
                 </div>
                 <button
                   className="st-reset-cancel"
-                  onClick={() => setResetModal(null)}
+                  onClick={closeResetModal}
                 >
                   İptal
                 </button>
@@ -1496,26 +1571,68 @@ function Settings() {
                     silinecek. Masalar korunacak. Bu işlem geri alınamaz.
                   </p>
                 </div>
+
+                {resetPasswordRequired ? (
+                  <div className="settings-field">
+                    <label className="settings-label">Şifrenizi Doğrulayın</label>
+                    <input
+                      type="password"
+                      className="settings-input"
+                      value={resetPassword}
+                      onChange={(e) => {
+                        setResetPassword(e.target.value);
+                        setResetPasswordError(null);
+                      }}
+                      placeholder="Hesap şifreniz"
+                      autoComplete="current-password"
+                      disabled={resetLoading}
+                    />
+                  </div>
+                ) : (
+                  <p className="st-reset-info-note">
+                    Bu cihazda bu hesap için kayıtlı bir kimlik doğrulama
+                    bilgisi bulunamadı, bu yüzden şifre adımı atlanıyor. Devam
+                    etmek için yalnızca aşağıdaki onay kelimesini yazmanız
+                    yeterli.
+                  </p>
+                )}
+
+                <div className="settings-field">
+                  <label className="settings-label">
+                    Onaylamak için{" "}
+                    <span className="st-reset-phrase">{LOCAL_RESET_PHRASE}</span>{" "}
+                    yazın
+                  </label>
+                  <input
+                    type="text"
+                    className="settings-input"
+                    value={resetConfirmText}
+                    onChange={(e) => {
+                      setResetConfirmText(e.target.value);
+                      setResetPasswordError(null);
+                    }}
+                    placeholder={LOCAL_RESET_PHRASE}
+                    autoComplete="off"
+                    disabled={resetLoading}
+                  />
+                </div>
+
+                {resetPasswordError && (
+                  <p className="st-error">{resetPasswordError}</p>
+                )}
+
                 <div className="st-reset-actions">
                   <button
                     className="st-reset-cancel"
-                    onClick={() => setResetModal(null)}
+                    onClick={closeResetModal}
                     disabled={resetLoading}
                   >
                     İptal
                   </button>
                   <button
                     className="st-reset-confirm-btn"
-                    disabled={resetLoading}
-                    onClick={async () => {
-                      setResetLoading(true);
-                      try {
-                        await resetAllData();
-                      } finally {
-                        setResetLoading(false);
-                        setResetModal(null);
-                      }
-                    }}
+                    disabled={localConfirmDisabled}
+                    onClick={() => handleConfirmReset("local")}
                   >
                     {resetLoading ? "Sıfırlanıyor…" : "Yerel Sıfırla"}
                   </button>
@@ -1549,29 +1666,75 @@ function Settings() {
                     Supabase üzerindeki{" "}
                     <strong>tüm veriler kalıcı olarak silinecek</strong>:
                     siparişler, ürünler, kategoriler, malzemeler. Yerel veri de
-                    temizlenecek. Bu işlem geri alınamaz.
+                    temizlenecek. Bu işlem geri alınamaz.{" "}
+                    <strong>
+                      Bu değişiklik yalnızca bu cihazı değil, hesaba bağlı
+                      tüm cihazları etkiler.
+                    </strong>
                   </p>
                 </div>
+
+                {resetPasswordRequired ? (
+                  <div className="settings-field">
+                    <label className="settings-label">Şifrenizi Doğrulayın</label>
+                    <input
+                      type="password"
+                      className="settings-input"
+                      value={resetPassword}
+                      onChange={(e) => {
+                        setResetPassword(e.target.value);
+                        setResetPasswordError(null);
+                      }}
+                      placeholder="Hesap şifreniz"
+                      autoComplete="current-password"
+                      disabled={resetLoading}
+                    />
+                  </div>
+                ) : (
+                  <p className="st-reset-info-note">
+                    Bu cihazda bu hesap için kayıtlı bir kimlik doğrulama
+                    bilgisi bulunamadı, bu yüzden şifre adımı atlanıyor. Devam
+                    etmek için yalnızca aşağıdaki onay kelimesini yazmanız
+                    yeterli.
+                  </p>
+                )}
+
+                <div className="settings-field">
+                  <label className="settings-label">
+                    Onaylamak için{" "}
+                    <span className="st-reset-phrase">{ONLINE_RESET_PHRASE}</span>{" "}
+                    yazın
+                  </label>
+                  <input
+                    type="text"
+                    className="settings-input"
+                    value={resetConfirmText}
+                    onChange={(e) => {
+                      setResetConfirmText(e.target.value);
+                      setResetPasswordError(null);
+                    }}
+                    placeholder={ONLINE_RESET_PHRASE}
+                    autoComplete="off"
+                    disabled={resetLoading}
+                  />
+                </div>
+
+                {resetPasswordError && (
+                  <p className="st-error">{resetPasswordError}</p>
+                )}
+
                 <div className="st-reset-actions">
                   <button
                     className="st-reset-cancel"
-                    onClick={() => setResetModal(null)}
+                    onClick={closeResetModal}
                     disabled={resetLoading}
                   >
                     İptal
                   </button>
                   <button
                     className="st-reset-confirm-btn st-reset-confirm-btn--online"
-                    disabled={resetLoading}
-                    onClick={async () => {
-                      setResetLoading(true);
-                      try {
-                        await resetOnlineData();
-                      } finally {
-                        setResetLoading(false);
-                        setResetModal(null);
-                      }
-                    }}
+                    disabled={onlineConfirmDisabled}
+                    onClick={() => handleConfirmReset("online")}
                   >
                     {resetLoading ? "Sıfırlanıyor…" : "Çevrimiçi Sıfırla"}
                   </button>

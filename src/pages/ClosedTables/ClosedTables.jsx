@@ -154,6 +154,11 @@ export default function ClosedTables() {
                     <div className="ct-row__main">
                       <span className="ct-row__table">{o.tableName}</span>
                       <span className="ct-row__time">{formatTime(o.closedAt)}</span>
+                      {o.hasSettledPayment && (
+                        <span className="ct-row__debt-warning" title="Bu siparişte tahsil edilmiş veresiye kaydı var — Düzeltme bu kaydı siler">
+                          ⚠ Tahsil Edilmiş Veresiye
+                        </span>
+                      )}
                       <span className="ct-row__payment">{paymentLabel(o.paymentMethod)}</span>
                     </div>
                     <div className="ct-row__summary">{itemsSummary(o.items)}</div>
