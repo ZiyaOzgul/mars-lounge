@@ -37,7 +37,7 @@ function RequireP({ permKey, children }) {
 }
 
 function AppShell() {
-  const { dbReady, dbError, triggerSync } = useApp()
+  const { dbReady, dbError, dbRecoveryWarning, triggerSync } = useApp()
   const { isOnline } = useOnlineStatus({ onReconnect: triggerSync })
 
   // Sync once on startup if online and DB is ready
@@ -63,6 +63,11 @@ function AppShell() {
         {dbError && (
           <div className="db-error-banner">
             ⚠ Veritabanı hatası: {dbError}
+          </div>
+        )}
+        {dbRecoveryWarning && (
+          <div className="db-error-banner">
+            ⚠ {dbRecoveryWarning}
           </div>
         )}
         {!isOnline && (

@@ -33,6 +33,14 @@ function newLocalId() {
 
 export function isDbInitialized() { return db !== null }
 
+// Set when initDb() had to recover from a corrupt/unreadable db file (from
+// the rolling .bak backup, or — only as a last resort — a fresh empty db).
+// Never cleared automatically; AppContext reads it once right after initDb()
+// resolves and surfaces it as a persistent, visible warning so a recovered
+// or reset local database is never mistaken for a clean start.
+let dbInitWarning = null
+export function getDbInitWarning() { return dbInitWarning }
+
 // ── Seed data (inserted once on first run) ────────────────────────
 // Masa sayısı. Supabase'deki public.tables ile AYNI id aralığını (1..N)
 // kaplamak zorunda: siparişler table_id'yi olduğu gibi Supabase'e gönderiyor,
@@ -231,11 +239,50 @@ export async function initDb() {
       console.warn('[localDb] Could not read DB file from disk', e)
     }
   }
-  try {
-    db = loaded ? new SQL.Database(new Uint8Array(loaded)) : new SQL.Database()
-  } catch (e) {
-    console.warn('[localDb] Existing DB unreadable — starting fresh', e)
+  if (!loaded) {
+    // First run — no file on disk yet. Clean empty db, no warning.
     db = new SQL.Database()
+  } else {
+    try {
+      db = new SQL.Database(new Uint8Array(loaded))
+    } catch (e) {
+      // The live file exists but failed to parse (truncated write, disk
+      // corruption, …). NEVER silently reseed an empty db here — that would
+      // discard the user's entire local database with no trace. Try the
+      // rolling backup first; only give up and go fresh if that also fails.
+      console.error('[localDb] Ana veritabanı dosyası bozuk — okunamadı:', e)
+
+      let backupLoaded = null
+      if (window.electronAPI?.db?.readBackup) {
+        try { backupLoaded = await window.electronAPI.db.readBackup() } catch (be) {
+          console.error('[localDb] Yedek dosyası okunamadı', be)
+        }
+      }
+
+      if (backupLoaded) {
+        try {
+          db = new SQL.Database(new Uint8Array(backupLoaded))
+          dbInitWarning =
+            'Ana veritabanı dosyası bozuk olduğu için bir önceki yedekten geri yüklendi. ' +
+            'Kapanmadan hemen önce yapılan birkaç işlem kaybolmuş olabilir — lütfen açık ' +
+            'masaları ve son siparişleri kontrol edin.'
+          console.error('[localDb] KRİTİK: yedekten kurtarma yapıldı —', dbInitWarning)
+        } catch (be) {
+          console.error('[localDb] Yedek dosyası da bozuk — okunamadı:', be)
+          db = new SQL.Database()
+          dbInitWarning =
+            'Yerel veritabanı dosyası VE yedeği bozuk olduğu için okunamadı. Boş bir ' +
+            'veritabanıyla devam ediliyor — önceki veriler kurtarılamadı. Lütfen destek ' +
+            'ekibiyle iletişime geçin.'
+        }
+      } else {
+        db = new SQL.Database()
+        dbInitWarning =
+          'Yerel veritabanı dosyası bozuk olduğu için okunamadı ve bir yedek bulunamadı. ' +
+          'Boş bir veritabanıyla devam ediliyor — önceki veriler kurtarılamadı. Lütfen ' +
+          'destek ekibiyle iletişime geçin.'
+      }
+    }
   }
 
   db.run(SCHEMA)

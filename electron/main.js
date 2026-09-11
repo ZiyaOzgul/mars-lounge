@@ -105,6 +105,25 @@ function createWindow() {
       win.setFullScreen(!win.isFullScreen())
     }
   })
+
+  // En yaygın kapatma yolu (pencerenin X butonu) 'window-all-closed' →
+  // app.quit() → 'before-quit' zincirini tetikler, ama o noktada pencere
+  // zaten yok edilmiş olur ve renderer'a flush isteği gönderilemez. Bu yüzden
+  // flush'u burada, pencere hâlâ canlıyken, kendi 'close' olayında yapıyoruz.
+  // İlk 'close' engellenir ve flush beklenir; flush bitince win.__forceClose
+  // işaretlenip win.close() tekrar çağrılır — bu ikinci çağrı engellenmez ve
+  // pencere gerçekten kapanır. Böylece pencere asla kapanmaz hâle gelmez.
+  win.on('close', (event) => {
+    if (win.__forceClose || allowQuit || flushDone) return // zaten flush edildi/onaylandı — gerçek kapanışa izin ver
+
+    event.preventDefault()
+    if (flushInProgress) return // before-quit tarafından başlatılan flush zaten sürüyor, onu bekle
+
+    beginFlush(win, () => {
+      win.__forceClose = true
+      win.close()
+    })
+  })
 }
 
 ipcMain.on('get-user-data-path', (event) => {
@@ -116,7 +135,12 @@ ipcMain.on('get-version', (event) => {
 })
 
 // ── SQLite file persistence ───────────────────────────────────────
-const DB_FILE = () => path.join(app.getPath('userData'), 'san-lucas.db')
+// Live app, real customer/order data — a write must never leave the file
+// half-written (crash / power loss / AV lock mid-write), and there must
+// always be one known-good previous generation to fall back to.
+const DB_FILE     = () => path.join(app.getPath('userData'), 'san-lucas.db')
+const DB_TMP_FILE = () => path.join(app.getPath('userData'), 'san-lucas.db.tmp')
+const DB_BAK_FILE = () => path.join(app.getPath('userData'), 'san-lucas.db.bak')
 
 ipcMain.handle('db-read', () => {
   try {
@@ -127,11 +151,42 @@ ipcMain.handle('db-read', () => {
   }
 })
 
+// Lets the renderer recover from the last known-good generation when the
+// live file turns out to be corrupt/truncated (see localDb.js initDb).
+ipcMain.handle('db-read-backup', () => {
+  try {
+    const buf = fs.readFileSync(DB_BAK_FILE())
+    return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)
+  } catch {
+    return null // no backup available yet
+  }
+})
+
 ipcMain.handle('db-write', (event, data) => {
   try {
-    fs.writeFileSync(DB_FILE(), Buffer.from(data))
+    const dbFile  = DB_FILE()
+    const tmpFile = DB_TMP_FILE()
+    const bakFile = DB_BAK_FILE()
+
+    // 1) Write the new bytes to a scratch file first — if this fails or is
+    //    interrupted, the live db file is never touched.
+    fs.writeFileSync(tmpFile, Buffer.from(data))
+
+    // 2) Roll the current live file into .bak *before* replacing it, so
+    //    there is always one previous generation to recover from.
+    try {
+      const stat = fs.statSync(dbFile)
+      if (stat.size > 0) fs.copyFileSync(dbFile, bakFile)
+    } catch {
+      // No existing file yet (first run) — nothing to back up.
+    }
+
+    // 3) Same-volume rename is atomic on NTFS/Windows — the live file either
+    //    stays as the previous generation or becomes the new one in full,
+    //    never a partial write.
+    fs.renameSync(tmpFile, dbFile)
   } catch (err) {
-    console.error('[db-write] failed:', err)
+    console.error('[db-write] KRİTİK: veritabanı dosyası diske yazılamadı:', err)
   }
 })
 
@@ -316,4 +371,82 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
+})
+
+// ── Flush the debounced local-DB write before quitting ─────────────
+// AppContext persists open tables to sql.js on a ~1s debounce. Quitting
+// within that window would otherwise lose the write entirely. We hold the
+// quit, ask the renderer to flush immediately, and let it through once the
+// renderer acks or FLUSH_TIMEOUT_MS elapses — whichever comes first — so the
+// app can never become unquittable even if the renderer is gone/unresponsive.
+//
+// Two paths can trigger this: the window's own 'close' event (the X button —
+// the common case, handled in createWindow while the renderer is still
+// alive) and app's 'before-quit' (menu/programmatic quit, autoUpdater
+// quitAndInstall — cases where a window may still be alive when quit is
+// requested). Both share beginFlush()/flushDone/flushInProgress below so
+// whichever path runs first "wins" the flush and the other just rides along
+// — neither path waits a second FLUSH_TIMEOUT_MS.
+const FLUSH_TIMEOUT_MS = 3000
+let allowQuit = false
+let flushInProgress = false
+let flushDone = false // true once a flush round has finished (ack/timeout/dead renderer) for this quit attempt
+
+// Sends 'flush-before-quit' to win and calls onComplete() once the renderer
+// acks, FLUSH_TIMEOUT_MS elapses, or the renderer turns out to be
+// unreachable — whichever happens first. Always calls onComplete() exactly
+// once; never leaves a dangling ipcMain 'flush-before-quit-ack' listener.
+function beginFlush(win, onComplete) {
+  if (!win || win.isDestroyed() || !win.webContents || win.webContents.isDestroyed()) {
+    flushDone = true
+    onComplete()
+    return
+  }
+
+  flushInProgress = true
+
+  const finish = () => {
+    if (flushDone) return // ack ve timeout aynı anda yarışırsa ikinci kez çalışmasın
+    flushDone = true
+    flushInProgress = false
+    onComplete()
+  }
+
+  const timer = setTimeout(() => {
+    console.error('[flush] renderer flush zaman aşımına uğradı — kapatma devam ediyor')
+    ipcMain.removeAllListeners('flush-before-quit-ack') // sonraki round'u kirletecek sarkan listener bırakma
+    finish()
+  }, FLUSH_TIMEOUT_MS)
+
+  ipcMain.once('flush-before-quit-ack', () => {
+    clearTimeout(timer)
+    finish()
+  })
+
+  try {
+    win.webContents.send('flush-before-quit')
+  } catch (err) {
+    console.error('[flush] flush isteği renderer’a gönderilemedi:', err)
+    clearTimeout(timer)
+    ipcMain.removeAllListeners('flush-before-quit-ack')
+    finish()
+  }
+}
+
+app.on('before-quit', (event) => {
+  if (allowQuit) return // quit already cleared — let it proceed normally
+
+  if (flushDone) return // 'close' yolu zaten flush'ı tamamladı — ikinci kez bekleme, normal akışa izin ver
+  if (flushInProgress) { event.preventDefault(); return } // başka bir round zaten sürüyor, onu bekle
+
+  event.preventDefault()
+
+  const finishQuit = () => {
+    if (allowQuit) return
+    allowQuit = true
+    app.quit()
+  }
+
+  const win = BrowserWindow.getAllWindows()[0]
+  beginFlush(win, finishQuit)
 })
