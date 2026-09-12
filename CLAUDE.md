@@ -5,6 +5,22 @@ Windows desktop POS application for a cafe. Built with Electron + React + Vite. 
 
 ---
 
+## ⚠️ Önce Oku: Proje Durumu
+
+**Bu canlı bir sistemdir** — gerçek bir kafede, gerçek parayla, tek bir Windows PC
+üzerinde çalışır. Herhangi bir işe başlamadan önce **`docs/PROJE-DURUMU.md`** dosyasını
+oku. Orada şunlar var: hangi hataların düzeltildiği, hangilerinin bilerek açık
+bırakıldığı (dosya:satır ile), canlı veritabanının durumu, kullanıcı kararı bekleyen
+maddeler ve bu projede pahalıya mal olmuş hatalardan çıkan çalışma kuralları.
+
+Kritik iki nokta, oradan özet:
+- **Yerel sql.js veritabanı kaynak, Supabase kopya.** Yerel dosyanın kaybı geri dönüşü
+  olmayan geçmiş kaybıdır (sunucudan yalnızca son 30 gün çekilir).
+- **Uygulama kendini günceller.** `v*` tag'i atmak, güncellemenin canlı kasaya gitmesi
+  demektir. Veri riski olan bir değişiklik gönderiyorsan önce yedek alınmalı.
+
+---
+
 ## Tech Stack
 - **Electron** — desktop wrapper
 - **React 19** — UI
