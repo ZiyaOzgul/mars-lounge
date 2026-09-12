@@ -791,6 +791,17 @@
   color: #fff;
 }
 
+.st-danger-admin-note {
+  margin: 0;
+  padding: 14px 16px;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-input);
+  background: var(--color-bg-page);
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 /* ── Auto-save toast ── */
 .st-saved-toast {
   position: fixed;
@@ -1055,6 +1066,29 @@
 .st-reset-confirm-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .st-reset-confirm-btn--online { background: var(--color-danger); }
+
+.st-reset-phrase {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--color-accent-light);
+  color: var(--color-accent);
+  font-family: monospace;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: none;
+}
+
+.st-reset-info-note {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: var(--radius-input);
+  background: var(--color-bg-page);
+  border: 1px dashed var(--color-border);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.55;
+}
 
 /* ── Sync Log Timeline ───────────────────────────────────────────── */
 .st-sync-log-title {

@@ -1,4 +1,4 @@
-import { useState, useEffect, Fragment } from 'react'
+import { useState, useEffect, useCallback, Fragment } from 'react'
 import { useApp } from '../../context/AppContext.jsx'
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
@@ -86,13 +86,11 @@ function Reports() {
   const [expandedOrderId, setExpandedOrderId] = useState(null)
   const [expandedItems,   setExpandedItems]   = useState([])
 
-  /* eslint-disable react-hooks/set-state-in-effect -- reads the external sql.js store into state */
-  useEffect(() => {
-    if (!dbReady) return
-    // Gün sınırları her turda yeniden okunur: "Günü Bitir" basıldığında
-    // raporlar aynı anda yeni sınıra geçsin.
-    const cls = getDayClosures()
-    setClosures(cls)
+  // Data refresh, split out from the effect below so the 60s low-frequency
+  // re-trigger (see next effect) can re-run it without resetting
+  // expandedOrderId — that reset is only appropriate when the user actually
+  // switches tab/day, not on a background refresh.
+  const refreshReportData = useCallback((cls) => {
     const [start, end] = getDateRange(activeTab, customDay, cls)
     setKpis(getReportKpis(start, end))
     setTopProduct(getTopProduct(start, end))
@@ -107,9 +105,40 @@ function Reports() {
     setStaffData(getStaffPerformance(start, end))
     setIngredientData(getIngredientConsumption(start, end))
     setOrdersList(getOrdersList(start, end))
+  }, [activeTab, customDay])
+
+  /* eslint-disable react-hooks/set-state-in-effect -- reads the external sql.js store into state */
+  useEffect(() => {
+    if (!dbReady) return
+    // Gün sınırları her turda yeniden okunur: "Günü Bitir" basıldığında
+    // raporlar aynı anda yeni sınıra geçsin.
+    const cls = getDayClosures()
+    setClosures(cls)
+    refreshReportData(cls)
     setExpandedOrderId(null)
-  }, [activeTab, customDay, dbReady])
+  }, [activeTab, customDay, dbReady, refreshReportData])
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  // Left open across a business-day boundary (or just a long shift), a
+  // time-relative tab shows numbers frozen at whatever moment the effect
+  // above last ran — new sales never appear and the day boundary never
+  // advances until the operator touches a tab. Re-run the same data refresh
+  // every 60s while the visible range is still time-relative ("Bugün", or
+  // the day-picker pointed at today); skip entirely for fixed historical
+  // ranges since re-fetching them is pointless. Deliberately does NOT touch
+  // expandedOrderId or the table/product/staff modals — a background refresh
+  // must be invisible to whatever the operator is doing on screen.
+  useEffect(() => {
+    if (!dbReady) return
+    const isTimeRelative = activeTab === 'today' || (activeTab === 'day' && customDay === toIso(new Date()))
+    if (!isTimeRelative) return
+    const t = setInterval(() => {
+      const cls = getDayClosures()
+      setClosures(cls)
+      refreshReportData(cls)
+    }, 60_000)
+    return () => clearInterval(t)
+  }, [dbReady, activeTab, customDay, refreshReportData])
 
   const tab = TABS.find(t => t.id === activeTab) ?? DAY_TAB
   const totalPayment = paymentData.reduce((s, d) => s + d.value, 0)

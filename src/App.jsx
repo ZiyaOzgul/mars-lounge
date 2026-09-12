@@ -37,7 +37,7 @@ function RequireP({ permKey, children }) {
 }
 
 function AppShell() {
-  const { dbReady, dbError, triggerSync } = useApp()
+  const { dbReady, dbError, dbRecoveryWarning, dbWriteWarning, triggerSync } = useApp()
   const { isOnline } = useOnlineStatus({ onReconnect: triggerSync })
 
   // Sync once on startup if online and DB is ready
@@ -63,6 +63,19 @@ function AppShell() {
         {dbError && (
           <div className="db-error-banner">
             ⚠ Veritabanı hatası: {dbError}
+          </div>
+        )}
+        {dbRecoveryWarning && (
+          <div className="db-error-banner">
+            ⚠ {dbRecoveryWarning}
+          </div>
+        )}
+        {dbWriteWarning && (
+          <div className="db-error-banner">
+            ⚠ KRİTİK: Veritabanı diske yazılamıyor! Şu an girilen siparişler ve yapılan değişiklikler
+            KAYDEDİLMİYOR — uygulama kapanır veya yeniden başlarsa kaybolur. Çalışmaya devam etmeyin;
+            önce bu sorunu çözün (disk dolu, dosya başka bir programda açık veya antivirüs/OneDrive
+            engelliyor olabilir). Sorun devam ederse destek ekibiyle iletişime geçin. ({dbWriteWarning.message})
           </div>
         )}
         {!isOnline && (

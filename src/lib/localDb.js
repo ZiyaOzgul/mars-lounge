@@ -33,6 +33,38 @@ function newLocalId() {
 
 export function isDbInitialized() { return db !== null }
 
+// Set when initDb() had to recover from a corrupt/unreadable db file (from
+// the rolling .bak backup, or — only as a last resort — a fresh empty db).
+// Never cleared automatically; AppContext reads it once right after initDb()
+// resolves and surfaces it as a persistent, visible warning so a recovered
+// or reset local database is never mistaken for a clean start.
+let dbInitWarning = null
+export function getDbInitWarning() { return dbInitWarning }
+
+// Set whenever a disk write from persistDb() fails (disk full, file lock,
+// antivirus/OneDrive lock, …). Until this was tracked, a failing write was
+// completely invisible — the app kept running normally while nothing
+// reached disk, and everything since the last successful write was lost on
+// the next crash/restart. persistDb() is called from dozens of write paths
+// and is not React-aware, so state changes are pushed to a single
+// module-level subscriber (registered by AppContext on mount) instead of a
+// full event bus. Cleared automatically on the next successful write.
+let dbWriteFailure = null
+export function getDbWriteFailure() { return dbWriteFailure }
+
+let dbWriteFailureListener = null
+// AppContext calls this once on mount. Returns an unsubscribe function.
+export function onDbWriteFailureChange(listener) {
+  dbWriteFailureListener = listener
+  return () => { if (dbWriteFailureListener === listener) dbWriteFailureListener = null }
+}
+
+function setDbWriteFailure(next) {
+  if (dbWriteFailure === next) return
+  dbWriteFailure = next
+  dbWriteFailureListener?.(next)
+}
+
 // ── Seed data (inserted once on first run) ────────────────────────
 // Masa sayısı. Supabase'deki public.tables ile AYNI id aralığını (1..N)
 // kaplamak zorunda: siparişler table_id'yi olduğu gibi Supabase'e gönderiyor,
@@ -231,11 +263,50 @@ export async function initDb() {
       console.warn('[localDb] Could not read DB file from disk', e)
     }
   }
-  try {
-    db = loaded ? new SQL.Database(new Uint8Array(loaded)) : new SQL.Database()
-  } catch (e) {
-    console.warn('[localDb] Existing DB unreadable — starting fresh', e)
+  if (!loaded) {
+    // First run — no file on disk yet. Clean empty db, no warning.
     db = new SQL.Database()
+  } else {
+    try {
+      db = new SQL.Database(new Uint8Array(loaded))
+    } catch (e) {
+      // The live file exists but failed to parse (truncated write, disk
+      // corruption, …). NEVER silently reseed an empty db here — that would
+      // discard the user's entire local database with no trace. Try the
+      // rolling backup first; only give up and go fresh if that also fails.
+      console.error('[localDb] Ana veritabanı dosyası bozuk — okunamadı:', e)
+
+      let backupLoaded = null
+      if (window.electronAPI?.db?.readBackup) {
+        try { backupLoaded = await window.electronAPI.db.readBackup() } catch (be) {
+          console.error('[localDb] Yedek dosyası okunamadı', be)
+        }
+      }
+
+      if (backupLoaded) {
+        try {
+          db = new SQL.Database(new Uint8Array(backupLoaded))
+          dbInitWarning =
+            'Ana veritabanı dosyası bozuk olduğu için bir önceki yedekten geri yüklendi. ' +
+            'Kapanmadan hemen önce yapılan birkaç işlem kaybolmuş olabilir — lütfen açık ' +
+            'masaları ve son siparişleri kontrol edin.'
+          console.error('[localDb] KRİTİK: yedekten kurtarma yapıldı —', dbInitWarning)
+        } catch (be) {
+          console.error('[localDb] Yedek dosyası da bozuk — okunamadı:', be)
+          db = new SQL.Database()
+          dbInitWarning =
+            'Yerel veritabanı dosyası VE yedeği bozuk olduğu için okunamadı. Boş bir ' +
+            'veritabanıyla devam ediliyor — önceki veriler kurtarılamadı. Lütfen destek ' +
+            'ekibiyle iletişime geçin.'
+        }
+      } else {
+        db = new SQL.Database()
+        dbInitWarning =
+          'Yerel veritabanı dosyası bozuk olduğu için okunamadı ve bir yedek bulunamadı. ' +
+          'Boş bir veritabanıyla devam ediliyor — önceki veriler kurtarılamadı. Lütfen ' +
+          'destek ekibiyle iletişime geçin.'
+      }
+    }
   }
 
   db.run(SCHEMA)
@@ -445,10 +516,25 @@ export async function initDb() {
 }
 
 // ── Persist to disk ───────────────────────────────────────────────
+// Called on every write, many of them on hot paths — never add retries,
+// delays, or other work here that would slow it down. Detect and report
+// the result only.
 export async function persistDb() {
   if (!db || !window.electronAPI?.db?.write) return
   const data = db.export()
-  await window.electronAPI.db.write(data)
+  const result = await window.electronAPI.db.write(data)
+  if (result?.ok === false) {
+    const message = result.error || 'Bilinmeyen hata'
+    console.error('[localDb] KRİTİK: veritabanı diske yazılamadı — girilen veriler kayıt altına alınmıyor:', message)
+    setDbWriteFailure({ message, timestamp: Date.now() })
+    return
+  }
+  if (result?.backupFailed) {
+    // Main write succeeded — the real data is safe on disk. Only the rolling
+    // .bak copy failed, which is low severity: log it, don't alarm the operator.
+    console.warn('[localDb] Yedek (.bak) dosyası yazılamadı — ana veritabanı yazımı başarılı, veri güvende')
+  }
+  setDbWriteFailure(null)
 }
 
 // ── table_defs (LOCAL ONLY) ───────────────────────────────────────
@@ -3186,6 +3272,31 @@ export function getCompletedOrderDetail(orderId) {
   }
 }
 
+// Payments already *settled* (settled_at set) on a closed order — i.e. a
+// veresiye debt that was physically collected after the order closed, days
+// or weeks later. Correction-mode reopen (below) permanently deletes every
+// payment row on the order, local + remote, so callers MUST show these to
+// the user and get explicit confirmation before invoking that path. See
+// reopenOperations.js / ReopenModal.jsx.
+export function getSettledPaymentsForOrder(orderId) {
+  requireDb()
+  const res = db.exec(
+    `SELECT amount, payment_method, payer_label, settled_at, settled_method
+     FROM payments
+     WHERE order_id = ? AND settled_at IS NOT NULL
+     ORDER BY settled_at`,
+    [orderId]
+  )
+  if (!res.length) return []
+  return res[0].values.map(([amount, paymentMethod, payerLabel, settledAt, settledMethod]) => ({
+    amount,
+    paymentMethod,
+    payerLabel: payerLabel || null,
+    settledAt,
+    settledMethod: settledMethod || null,
+  }))
+}
+
 // Reopening for correction cancels the original order and undoes its
 // payments — tombstoning remote payments (if any) and clearing the local
 // payment rows so the order carries no stale collected amount.
@@ -3266,8 +3377,20 @@ export function getClosedOrders({ sinceIso = null, limit = 200 } = {}) {
     }
   }
 
+  // Flag orders carrying an already-settled veresiye/payment — reopening
+  // one for correction is destructive (see getSettledPaymentsForOrder), so
+  // the "Kapananlar" list and reopen dialog warn about it up front.
+  const settledRes = db.exec(
+    `SELECT DISTINCT order_id FROM payments WHERE order_id IN (${placeholders}) AND settled_at IS NOT NULL`,
+    orderIds
+  )
+  const settledOrderIds = new Set(
+    settledRes.length ? settledRes[0].values.map(([oid]) => oid) : []
+  )
+
   for (const o of orders) {
     o.items = itemsByOrder[o.id] || []
+    o.hasSettledPayment = settledOrderIds.has(o.id)
   }
   return orders
 }

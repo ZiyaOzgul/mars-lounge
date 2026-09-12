@@ -102,6 +102,11 @@ export async function syncToSupabase(log = null) {
       } else {
         err(`[Sync] ✗ Ürün deaktive edilemedi: remote:${pd.remote_id}`, softErr)
       }
+    } else if (error.code === '23503') {
+      // Non-product entity is referenced by existing sales records — cannot delete
+      // Accept this and stop retrying
+      await clearPendingDelete(pd.id)
+      inf(`[Sync] ℹ Silinmedi — satış kayıtları bu kaydı kullanıyor, bir daha denenmeyecek: ${pd.entity_type} remote:${pd.remote_id}`)
     } else {
       err(`[Sync] ✗ Silinemedi: ${pd.entity_type} remote:${pd.remote_id}`, error)
     }

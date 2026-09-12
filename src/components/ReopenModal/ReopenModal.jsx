@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useApp } from '../../context/AppContext.jsx'
 import TablePickerModal from '../TablePickerModal/TablePickerModal.jsx'
 import { hasPerm } from '../../lib/permissions.js'
+import { getSettledPaymentsForOrder } from '../../lib/localDb.js'
 import './ReopenModal.css'
 
 const MODES = [
@@ -31,6 +32,26 @@ function fmt(n) {
   return `₺${Number(n || 0).toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
+function fmtDateTime(iso) {
+  if (!iso) return '—'
+  return new Date(iso).toLocaleString('tr-TR', {
+    day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit',
+  })
+}
+
+const PAYMENT_METHOD_LABELS = {
+  cash: 'Nakit',
+  card: 'Kart',
+  iban: 'IBAN',
+  veresiye: 'Veresiye',
+  split: 'Karma',
+  points: 'Puan',
+}
+
+function paymentMethodLabel(method) {
+  return PAYMENT_METHOD_LABELS[method] ?? (method || '—')
+}
+
 function ReopenModal({ order, onClose }) {
   const { reopenClosedOrder, tableDefs, runtimeStates, currentUser } = useApp()
   const canReopen = hasPerm(currentUser, 'reopen_table')
@@ -42,6 +63,21 @@ function ReopenModal({ order, onClose }) {
   const [pickerOpen, setPickerOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState(null)
+
+  // Settled (already-collected) payments on this order — e.g. a veresiye
+  // debt paid off weeks after the table closed. "Düzeltme" permanently
+  // deletes these rows (local + server), so they must be surfaced and
+  // explicitly confirmed before that mode is allowed to proceed.
+  const settledPayments = useMemo(() => {
+    try {
+      return getSettledPaymentsForOrder(order.id)
+    } catch (e) {
+      console.error('[ReopenModal] settled payments lookup failed', e)
+      return []
+    }
+  }, [order.id])
+  const [showDebtConfirm, setShowDebtConfirm] = useState(false)
+  const hasSettledDebt = settledPayments.length > 0
 
   const targetTableName = useMemo(() => {
     return tableDefs.find(t => t.id === targetTableId)?.name ?? order.tableName
@@ -69,8 +105,7 @@ function ReopenModal({ order, onClose }) {
 
   const canConfirm = canReopen && !!mode && selectedIds.size > 0 && !submitting
 
-  const handleConfirm = async () => {
-    if (!canConfirm) return
+  const doReopen = async () => {
     setSubmitting(true)
     setError(null)
     try {
@@ -87,6 +122,24 @@ function ReopenModal({ order, onClose }) {
       setError(e?.message ?? 'Sipariş yeniden açılamadı')
       setSubmitting(false)
     }
+  }
+
+  const handleConfirm = () => {
+    if (!canConfirm) return
+    // Correction mode deletes every payment row on this order. If any of
+    // them was already settled (a debt actually collected), that record —
+    // and the cash it represents — vanishes with no trace. Require an
+    // explicit, informed second confirmation before that can happen.
+    if (mode === 'correction' && hasSettledDebt) {
+      setShowDebtConfirm(true)
+      return
+    }
+    doReopen()
+  }
+
+  const handleConfirmDebtDeletion = () => {
+    setShowDebtConfirm(false)
+    doReopen()
   }
 
   return (
@@ -149,7 +202,12 @@ function ReopenModal({ order, onClose }) {
                 className={`reo-mode${mode === m.id ? ' reo-mode--active' : ''}`}
                 onClick={() => setMode(m.id)}
               >
-                <span className="reo-mode__label">{m.label}</span>
+                <span className="reo-mode__labelrow">
+                  <span className="reo-mode__label">{m.label}</span>
+                  {m.id === 'correction' && hasSettledDebt && (
+                    <span className="reo-mode__warning">Tahsilat silinir</span>
+                  )}
+                </span>
                 <span className="reo-mode__hint">{m.hint}</span>
               </button>
             ))}
@@ -197,6 +255,37 @@ function ReopenModal({ order, onClose }) {
         onSelect={(t) => { setTargetTableId(t.id); setPickerOpen(false) }}
         onClose={() => setPickerOpen(false)}
       />
+
+      {showDebtConfirm && (
+        <div className="reo-debt-overlay" onClick={e => e.target === e.currentTarget && setShowDebtConfirm(false)}>
+          <div className="reo-debt-modal">
+            <h3 className="reo-debt-title">Tahsil Edilmiş Ödemeler Silinecek</h3>
+            <p className="reo-debt-text">
+              Bu siparişte daha önce tahsil edilmiş ödeme kayıtları var. Düzeltme moduyla devam ederseniz
+              aşağıdaki kayıtlar bu cihazdan ve sunucudan <strong>kalıcı olarak silinir</strong>, sipariş iptal
+              edilerek ciro dışına alınır. Bu işlem geri alınamaz.
+            </p>
+            <div className="reo-debt-list">
+              {settledPayments.map((p, idx) => (
+                <div key={idx} className="reo-debt-item">
+                  <span className="reo-debt-item__amount">{fmt(p.amount)}</span>
+                  <span className="reo-debt-item__payer">{p.payerLabel || '—'}</span>
+                  <span className="reo-debt-item__date">{fmtDateTime(p.settledAt)}</span>
+                  <span className="reo-debt-item__method">{paymentMethodLabel(p.settledMethod || p.paymentMethod)}</span>
+                </div>
+              ))}
+            </div>
+            <div className="reo-debt-actions">
+              <button className="reo-btn reo-btn--cancel" onClick={() => setShowDebtConfirm(false)}>
+                Vazgeç
+              </button>
+              <button className="reo-btn reo-btn--danger" onClick={handleConfirmDebtDeletion}>
+                Kayıtları Sil ve Devam Et
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

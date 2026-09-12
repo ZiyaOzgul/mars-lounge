@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react'
 import {
-  initDb, isDbInitialized,
+  initDb, isDbInitialized, getDbInitWarning,
+  getDbWriteFailure, onDbWriteFailureChange,
   getAllTableDefs, insertTableDef, updateTableDef, deleteTableDef,
   getAllCategories,  insertCategory,  updateCategory,  deleteCategory,
   getAllProducts,    upsertProduct,   deleteProduct,
@@ -175,6 +176,16 @@ function hydrateGroupFromActiveOrder(o) {
 export function AppProvider({ children }) {
   const [dbReady,       setDbReady]       = useState(false)
   const [dbError,       setDbError]       = useState(null)
+  // Separate from dbError on purpose: dbError gates sync/persistence effects
+  // below (used for a genuinely unusable db), while a recovered-from-backup
+  // or reseeded-fresh db is fully usable — it just needs a loud, persistent,
+  // visible warning so the recovery is never mistaken for a clean start.
+  const [dbRecoveryWarning, setDbRecoveryWarning] = useState(null)
+  // Loud, persistent warning for a failing disk write (disk full, file lock,
+  // antivirus/OneDrive lock, …) — see localDb.js persistDb(). Non-null means
+  // whatever the operator enters right now is NOT reaching disk. Cleared
+  // automatically the moment a write succeeds again.
+  const [dbWriteWarning, setDbWriteWarning] = useState(() => getDbWriteFailure())
   const [tableDefs,     setTableDefs]     = useState([])
   const [categories,    setCategories]    = useState([])
   const [products,      setProducts]      = useState([])
@@ -201,6 +212,11 @@ export function AppProvider({ children }) {
   const isSyncingRef      = useRef(false)
   const pendingResyncRef  = useRef(false)
   const initialSyncRanRef = useRef(false)
+  // Always holds the latest runtimeStates — read by the maintenance-reload
+  // handler below, which is registered once on mount and would otherwise
+  // close over a stale (initial) runtimeStates.
+  const runtimeStatesRef  = useRef(runtimeStates)
+  useEffect(() => { runtimeStatesRef.current = runtimeStates }, [runtimeStates])
   const loginUser  = useCallback((u) => setCurrentUser(u), [])
   const logoutUser = useCallback(async () => {
     if (isSupabaseReady) {
@@ -274,6 +290,15 @@ export function AppProvider({ children }) {
     }
   }, [])
 
+  // persistDb() is called from dozens of places outside React and can't
+  // set state directly — it pushes failure/recovery through a single
+  // module-level subscriber instead. Mirror that into state here so the
+  // banner below updates immediately, in both directions.
+  useEffect(() => {
+    const unsubscribe = onDbWriteFailureChange((failure) => setDbWriteWarning(failure))
+    return unsubscribe
+  }, [])
+
   const refreshUnsyncedCount = useCallback(() => {
     if (isDbInitialized()) setUnsyncedCount(getUnsyncedCount())
   }, [])
@@ -335,6 +360,50 @@ export function AppProvider({ children }) {
     })
   }, [])
 
+  // ── Fix: a removed order item can resurrect ────────────────────
+  // handleRemoveItem (Tables.jsx) updates runtimeStates immediately through
+  // the setRuntimeStates this context exposes, but the SQL row is only
+  // deleted ~1s later by the debounced materializeOpenTables below. If a
+  // sync lands inside that window (any table in the cafe can trigger the
+  // realtime channel), mergeActiveOrdersIntoRuntime — additive on purpose,
+  // so a genuine remote addition (QR order) still appears — would see the
+  // not-yet-deleted DB row and re-add the item the cashier just removed.
+  // Wrapping the exposed setter to diff prev/next and remember removed item
+  // ids for a few seconds (comfortably longer than the 1s debounce) lets the
+  // merge below skip re-adding them, with no Tables.jsx change needed — it
+  // already calls this same context setter.
+  const RECENTLY_REMOVED_TTL_MS = 8000
+  const recentlyRemovedRef = useRef(new Map()) // itemId (string) -> removedAt (ms)
+
+  const isRecentlyRemoved = useCallback((id) => {
+    if (id == null) return false
+    const ts = recentlyRemovedRef.current.get(String(id))
+    return ts != null && (Date.now() - ts) < RECENTLY_REMOVED_TTL_MS
+  }, [])
+
+  const trackedSetRuntimeStates = useCallback((update) => {
+    setRuntimeStates(prev => {
+      const next = typeof update === 'function' ? update(prev) : update
+      const now = Date.now()
+      for (const [tid, prevState] of Object.entries(prev)) {
+        const prevIds = new Set()
+        for (const g of prevState.orders ?? []) for (const i of g.items) prevIds.add(String(i.id))
+        if (prevIds.size === 0) continue
+        const nextState = next[tid]
+        const nextIds = new Set()
+        if (nextState) for (const g of nextState.orders ?? []) for (const i of g.items) nextIds.add(String(i.id))
+        for (const id of prevIds) {
+          if (!nextIds.has(id)) recentlyRemovedRef.current.set(id, now)
+        }
+      }
+      // Opportunistic cleanup so the map never grows unbounded across a shift.
+      for (const [id, ts] of recentlyRemovedRef.current) {
+        if (now - ts > RECENTLY_REMOVED_TTL_MS) recentlyRemovedRef.current.delete(id)
+      }
+      return next
+    })
+  }, [])
+
   // After a pull, additively merge every active order sitting on Supabase
   // into the runtime table state — this is how a table opened by another
   // device (QR, mobile, another desktop) appears here live, without waiting
@@ -376,6 +445,9 @@ export function AppProvider({ children }) {
         for (const r of o.items) {
           if (knownIds.has(String(r.local_id))) continue
           if (r.remote_id != null && knownIds.has(String(r.remote_id))) continue
+          // Not yet deleted from disk, but removed on this screen moments ago
+          // — don't resurrect it (see the "removed order item" note above).
+          if (isRecentlyRemoved(r.local_id) || (r.remote_id != null && isRecentlyRemoved(r.remote_id))) continue
           newItems.push({
             id: r.remote_id != null ? Number(r.remote_id) : r.local_id,
             productId: r.product_id ?? null,
@@ -406,7 +478,7 @@ export function AppProvider({ children }) {
       }
       return changed ? next : prev
     })
-  }, [])
+  }, [isRecentlyRemoved])
 
   // Ekran durumunu yerel veritabanindan SIFIRDAN kurar (birlestirmez).
   //
@@ -625,6 +697,11 @@ export function AppProvider({ children }) {
       } catch (e) {
         console.warn('[AppContext] aktif sipariş geri yükleme hatası', e)
       }
+      const initWarning = getDbInitWarning()
+      if (initWarning) {
+        console.error('[AppContext] Veritabanı kurtarma uyarısı:', initWarning)
+        setDbRecoveryWarning(initWarning)
+      }
       setDbReady(true)
     }).catch(err => {
       console.error('[AppContext] DB init failed', err)
@@ -679,53 +756,136 @@ export function AppProvider({ children }) {
   // rebuilds all of them, not just partially-paid ones. Orders whose group
   // was removed from the UI with nothing paid are cleaned up so they don't
   // resurrect as ghost tables.
+  //
+  // Pulled out into its own function (rather than inlined in the debounce
+  // effect below) so the exact same materialize+persist work can also be run
+  // immediately — and awaited — from the before-quit flush handler, instead
+  // of duplicating the body.
+  const materializeOpenTables = useCallback(async () => {
+    if (!isDbInitialized()) return
+    try {
+      const liveGroupIds = new Set()
+      for (const [tidStr, state] of Object.entries(runtimeStates)) {
+        const tableId = Number(tidStr)
+        const groups = state.orders ?? []
+        const discount = state.discount?.amount ?? 0
+        const allSub = groups.reduce((s, g) => s + groupSubtotal(g.items), 0)
+        for (const g of groups) {
+          liveGroupIds.add(String(g.localId))
+          if (!g.items?.length) continue
+          const gSub = groupSubtotal(g.items)
+          const gDiscount = allSub > 0 ? discount * (gSub / allSub) : 0
+          const gTotal = Math.round((gSub - gDiscount) * 100) / 100
+          await ensurePersistedActiveOrder({
+            tableId,
+            tableName: tableDefs.find(td => td.id === tableId)?.name ?? '',
+            waiterName: state.waiter && state.waiter !== '—' ? state.waiter : null,
+            groupLocalId: g.localId,
+            supabaseOrderId: g.supabaseOrderId ?? null,
+            items: g.items,
+            total: gTotal,
+          })
+        }
+      }
+      for (const o of getAllActiveOrders()) {
+        if (liveGroupIds.has(String(o.local_id)) || o.totalPaid > 0) continue
+        if (o.remote_id == null) {
+          await deleteActiveOrderCascade(o.id) // never left this device — no trace needed
+        } else {
+          await setOrderStatus(o.id, 'cancelled') // propagates to Supabase on next push
+        }
+      }
+      // A local change just got materialized — push it out promptly instead
+      // of waiting for the 60s periodic re-sync.
+      if (navigator.onLine && isSupabaseReady && isDbInitialized() && getUnsyncedCount() > 0) {
+        syncIfOnline('local-change')
+      }
+    } catch (e) {
+      console.warn('[AppContext] açık masalar kalıcılaştırılamadı', e)
+    }
+  }, [runtimeStates, tableDefs, syncIfOnline])
+
+  // Always holds the latest materializeOpenTables — read by the flush
+  // handler below, which is registered once on mount and would otherwise
+  // close over a stale (initial) runtimeStates/tableDefs.
+  const materializeRef = useRef(materializeOpenTables)
+  useEffect(() => { materializeRef.current = materializeOpenTables }, [materializeOpenTables])
+
+  // Holds the pending debounce timer id so the flush handler can cancel it
+  // and run the same work immediately instead of racing it.
+  const persistTimerRef = useRef(null)
+
   useEffect(() => {
     if (!dbReady || dbError) return
-    const t = setTimeout(async () => {
-      if (!isDbInitialized()) return
-      try {
-        const liveGroupIds = new Set()
-        for (const [tidStr, state] of Object.entries(runtimeStates)) {
-          const tableId = Number(tidStr)
-          const groups = state.orders ?? []
-          const discount = state.discount?.amount ?? 0
-          const allSub = groups.reduce((s, g) => s + groupSubtotal(g.items), 0)
-          for (const g of groups) {
-            liveGroupIds.add(String(g.localId))
-            if (!g.items?.length) continue
-            const gSub = groupSubtotal(g.items)
-            const gDiscount = allSub > 0 ? discount * (gSub / allSub) : 0
-            const gTotal = Math.round((gSub - gDiscount) * 100) / 100
-            await ensurePersistedActiveOrder({
-              tableId,
-              tableName: tableDefs.find(td => td.id === tableId)?.name ?? '',
-              waiterName: state.waiter && state.waiter !== '—' ? state.waiter : null,
-              groupLocalId: g.localId,
-              supabaseOrderId: g.supabaseOrderId ?? null,
-              items: g.items,
-              total: gTotal,
-            })
-          }
-        }
-        for (const o of getAllActiveOrders()) {
-          if (liveGroupIds.has(String(o.local_id)) || o.totalPaid > 0) continue
-          if (o.remote_id == null) {
-            await deleteActiveOrderCascade(o.id) // never left this device — no trace needed
-          } else {
-            await setOrderStatus(o.id, 'cancelled') // propagates to Supabase on next push
-          }
-        }
-        // A local change just got materialized — push it out promptly instead
-        // of waiting for the 60s periodic re-sync.
-        if (navigator.onLine && isSupabaseReady && isDbInitialized() && getUnsyncedCount() > 0) {
-          syncIfOnline('local-change')
-        }
-      } catch (e) {
-        console.warn('[AppContext] açık masalar kalıcılaştırılamadı', e)
-      }
+    persistTimerRef.current = setTimeout(() => {
+      persistTimerRef.current = null
+      materializeOpenTables()
     }, 1000)
-    return () => clearTimeout(t)
-  }, [runtimeStates, dbReady, dbError, tableDefs, syncIfOnline])
+    return () => {
+      clearTimeout(persistTimerRef.current)
+      persistTimerRef.current = null
+    }
+  }, [dbReady, dbError, materializeOpenTables])
+
+  // ── Flush the pending debounced write before Electron quits ────
+  // main.js holds app quit at 'before-quit', sends 'flush-before-quit', and
+  // waits (up to 3s) for the ack sent here. Cancel the pending debounce timer
+  // (it would otherwise run redundantly a moment later) and run+await the
+  // same materialize function the timer uses, then ack. Safe to fire with
+  // nothing pending — materializeOpenTables() is a no-op-ish pass in that case.
+  useEffect(() => {
+    const unsubscribe = window.electronAPI?.lifecycle?.onFlushBeforeQuit?.(async () => {
+      try {
+        if (persistTimerRef.current) {
+          clearTimeout(persistTimerRef.current)
+          persistTimerRef.current = null
+        }
+        await materializeRef.current()
+      } catch (e) {
+        console.error('[AppContext] before-quit flush hata verdi', e)
+      } finally {
+        window.electronAPI?.lifecycle?.ackFlushBeforeQuit?.()
+      }
+    })
+    return () => { if (typeof unsubscribe === 'function') unsubscribe() }
+  }, [])
+
+  // ── Nightly maintenance reload (renderer-side approval) ─────────
+  // main.js sends this at 05:00 local and ONLY reloads if we call back
+  // approveMaintenanceReload(); if no approval arrives within 60s it skips
+  // and retries in 30 minutes, so declining here is always safe. Approve
+  // only when it's genuinely safe: no open table with items, no sync in
+  // flight, and no unsynced work sitting local that would be better pushed
+  // first. win.reload() does NOT fire the window 'close' event, so the
+  // before-quit flush above never runs on this path — the pending debounce
+  // must be cancelled and materializeOpenTables() run+awaited here before
+  // approving, exactly like the before-quit handler does. Approving without
+  // flushing first would reintroduce the data-loss bug this change set
+  // exists to fix.
+  useEffect(() => {
+    const unsubscribe = window.electronAPI?.lifecycle?.onMaintenanceReloadRequest?.(async () => {
+      try {
+        const hasOpenTables = Object.values(runtimeStatesRef.current).some(state =>
+          (state.orders ?? []).some(g => (g.items?.length ?? 0) > 0)
+        )
+        const hasUnsynced = isDbInitialized() && getUnsyncedCount() > 0
+        if (hasOpenTables || isSyncingRef.current || hasUnsynced) {
+          console.log(`[AppContext] Gece bakım yeniden başlatması ertelendi — açıkMasa=${hasOpenTables}, senkronizasyonDevamEdiyor=${isSyncingRef.current}, bekleyenVeri=${hasUnsynced}`)
+          return
+        }
+        if (persistTimerRef.current) {
+          clearTimeout(persistTimerRef.current)
+          persistTimerRef.current = null
+        }
+        await materializeRef.current()
+        console.log('[AppContext] Gece bakım yeniden başlatması onaylandı')
+        window.electronAPI?.lifecycle?.approveMaintenanceReload?.()
+      } catch (e) {
+        console.error('[AppContext] Gece bakım yeniden başlatma kontrolü hata verdi — onaylanmadı', e)
+      }
+    })
+    return () => { if (typeof unsubscribe === 'function') unsubscribe() }
+  }, [])
 
   // If the user signs in after the initial sync already ran (getSession
   // timeout path or manual login), re-sync so RLS-gated data arrives
@@ -1027,7 +1187,7 @@ export function AppProvider({ children }) {
 
   return (
     <AppContext.Provider value={{
-      dbReady, dbError,
+      dbReady, dbError, dbRecoveryWarning, dbWriteWarning,
       // Table defs (local only)
       tableDefs, addTableDef, editTableDef, removeTableDef,
       // Categories (local + cloud)
@@ -1056,8 +1216,10 @@ export function AppProvider({ children }) {
       syncLogs,
       // Loyalty points
       pointRate, setPointRatePersist,
-      // Active table orders (persists across navigation)
-      runtimeStates, setRuntimeStates,
+      // Active table orders (persists across navigation). Wrapped so a
+      // locally-removed item can't be resurrected by a merge landing inside
+      // the ~1s materialize debounce — see the note above mergeActiveOrdersIntoRuntime.
+      runtimeStates, setRuntimeStates: trackedSetRuntimeStates,
       // Auth
       currentUser, loginUser, logoutUser, authReady,
     }}>
