@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, Menu, protocol, net } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, Menu, protocol, net, shell } = require('electron')
 const { autoUpdater } = require('electron-updater')
 const path = require('path')
 const fs   = require('fs')
@@ -120,9 +120,7 @@ function createWindow() {
 
   win.webContents.on('render-process-gone', (event, details) => {
     const now = Date.now()
-    console.error(
-      `[${new Date(now).toISOString()}] [render-process-gone] renderer çöktü — reason: ${details.reason}, exitCode: ${details.exitCode}`
-    )
+    logLine(`[render-process-gone] renderer coktu — reason: ${details.reason}, exitCode: ${details.exitCode}`, 'error')
 
     recoveryTimestamps = recoveryTimestamps.filter((t) => now - t < CRASH_LOOP_WINDOW_MS)
 
@@ -167,7 +165,10 @@ function createWindow() {
   // ya da çürütmek için kullanılır.
   const memoryTimer = setInterval(() => logRendererMemory(win), MEMORY_LOG_INTERVAL_MS)
   win.once('closed', () => clearInterval(memoryTimer))
-  logRendererMemory(win) // başlangıç değeri de loglansın
+  // Ilk olcum renderer sureci ayaga kalktiktan SONRA alinmali —
+  // createWindow icinde hemen cagrilirsa surec henuz getAppMetrics'te
+  // gorunmez ve 'bilinmiyor' yazar.
+  win.webContents.once('did-finish-load', () => logRendererMemory(win))
 
   // En yaygın kapatma yolu (pencerenin X butonu) 'window-all-closed' →
   // app.quit() → 'before-quit' zincirini tetikler, ama o noktada pencere
@@ -270,15 +271,26 @@ function requestMaintenanceReload(win) {
 // ── Periyodik renderer bellek loglaması — yardımcı fonksiyon ────────
 const MEMORY_LOG_INTERVAL_MS = 15 * 60 * 1000
 
+// NOT: webContents.getProcessMemoryInfo() Electron 29'da YOKTUR (eski
+// surumlerde vardi, kaldirildi). Cagrilmasi senkron TypeError firlatir ve
+// setInterval icinden firladigi icin "A JavaScript error occurred in the
+// main process" penceresi olarak kasiyerin karsisina cikar. Dogru API
+// app.getAppMetrics() — senkron calisir ve tum sureclerin bellegini verir.
+//
+// Bu bir TANI fonksiyonu: hicbir kosulda uygulamayi dusurmemeli. Bu yuzden
+// govdesinin tamami try/catch icinde.
 function logRendererMemory(win) {
-  if (!win || win.isDestroyed() || !win.webContents || win.webContents.isDestroyed()) return
-  win.webContents.getProcessMemoryInfo()
-    .then((info) => {
-      console.log(`[${new Date().toISOString()}] [memory] renderer — residentSet: ${info.residentSet}KB, private: ${info.private}KB`)
-    })
-    .catch((err) => {
-      console.error('[memory] renderer bellek bilgisi okunamadı:', err)
-    })
+  try {
+    if (!win || win.isDestroyed() || !win.webContents || win.webContents.isDestroyed()) return
+    const rendererPid = win.webContents.getOSProcessId()
+    const metrics = app.getAppMetrics()
+    const renderer = metrics.find((m) => m.pid === rendererPid)
+    const browser  = metrics.find((m) => m.type === 'Browser')
+    const kb = (m) => (m && m.memory ? `${m.memory.workingSetSize}KB` : 'bilinmiyor')
+    logLine(`[memory] renderer: ${kb(renderer)} · ana surec: ${kb(browser)}`)
+  } catch (err) {
+    logLine(`[memory] bellek bilgisi okunamadi: ${err && err.message}`, 'error')
+  }
 }
 
 ipcMain.on('get-user-data-path', (event) => {
@@ -287,6 +299,55 @@ ipcMain.on('get-user-data-path', (event) => {
 
 ipcMain.on('get-version', (event) => {
   event.returnValue = app.getVersion()
+})
+
+// ── Log dosyasi + son savunma hatti ────────────────────────────────
+// Paketlenmis bir Windows uygulamasinda console.log HICBIR YERE gitmez:
+// kisayoldan baslatilinca stdout yoktur. Tani loglarimizin (cokme sebebi,
+// bellek, donma suresi, disk yazma hatasi) uretimde okunabilmesi icin
+// dosyaya da yaziyoruz. Kafedeki makineye erisimimiz yok; elimizdeki tek
+// kanit bugune kadar ekran fotograflariydi.
+const LOG_MAX_BYTES = 2 * 1024 * 1024
+
+function logFilePath() {
+  return path.join(app.getPath('userData'), 'logs', 'main.log')
+}
+
+function logLine(message, level = 'info') {
+  const line = `[${new Date().toISOString()}] ${message}`
+  if (level === 'error') console.error(line)
+  else console.log(line)
+  try {
+    const file = logFilePath()
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    // Basit devretme: dosya buyudugunde tek bir .1 kopyasi tutulur.
+    try {
+      if (fs.statSync(file).size > LOG_MAX_BYTES) fs.renameSync(file, file + '.1')
+    } catch { /* dosya yok — ilk yazim */ }
+    fs.appendFileSync(file, line + '\n')
+  } catch {
+    // Log yazilamiyorsa sessiz gec — loglama asla uygulamayi etkilememeli.
+  }
+}
+
+// Son savunma hatti: ana surecte yakalanmamis bir hata, Electron'un
+// "A JavaScript error occurred in the main process" penceresini kasiyerin
+// karsisina cikarir ve servisi durdurur. Bunlari yakalayip dosyaya
+// yaziyoruz — uygulama ayakta kalsin, biz de neyin patladigini gorelim.
+process.on('uncaughtException', (err) => {
+  logLine(`[uncaught] ana surecte yakalanmamis hata: ${err && err.stack ? err.stack : err}`, 'error')
+})
+process.on('unhandledRejection', (reason) => {
+  logLine(`[unhandled-rejection] ${reason && reason.stack ? reason.stack : reason}`, 'error')
+})
+
+ipcMain.handle('logs:open', () => {
+  try {
+    shell.showItemInFolder(logFilePath())
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) }
+  }
 })
 
 // ── SQLite file persistence ───────────────────────────────────────
@@ -358,7 +419,7 @@ ipcMain.handle('db-write', (event, data) => {
 
     return backupFailed ? { ok: true, backupFailed: true } : { ok: true }
   } catch (err) {
-    console.error('[db-write] KRİTİK: veritabanı dosyası diske yazılamadı:', err)
+    logLine(`[db-write] KRITIK: veritabani dosyasi diske yazilamadi: ${err && err.message}`, 'error')
     return { ok: false, error: String((err && err.message) || err) }
   }
 })

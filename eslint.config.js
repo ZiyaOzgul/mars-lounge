@@ -26,4 +26,14 @@ export default defineConfig([
       'no-unused-vars': ['error', { varsIgnorePattern: '^[A-Z_]' }],
     },
   },
+  // electron/ ana surecte ve preload'da calisir: CommonJS + Node global'leri.
+  // Bunlar tanimli olmadigi icin eslint burada ~19 sahte "is not defined"
+  // hatasi uretiyordu; o gurultu gercek hatalari gormeyi zorlastiriyor.
+  {
+    files: ['electron/**/*.js'],
+    languageOptions: {
+      globals: { ...globals.node },
+      sourceType: 'commonjs',
+    },
+  },
 ])
