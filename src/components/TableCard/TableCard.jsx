@@ -25,6 +25,16 @@ function splitName(name) {
     : { prefix: '', number: name }
 }
 
+// Geçici ad kart genişliğine sığmalı. Tek bir sabit punto uzun adları
+// "PENC…" gibi kırpıyor ve özelliğin amacını (adından tanımak) boşa
+// çıkarıyordu — uzunluğa göre küçültüp iki satıra izin veriyoruz.
+function guestSizeClass(label) {
+  const n = label.length
+  if (n <= 7)  return 'table-card__guest--lg'
+  if (n <= 12) return 'table-card__guest--md'
+  return 'table-card__guest--sm'
+}
+
 // Kart zemininde duran soluk marka filigranı: logo + masa numarası, ikisi de
 // aynı renk ve saydamlıkta. Salt dekoratif — aria-hidden ve pointer-events:none,
 // yani ekran okuyucuya ve tıklamaya karışmaz.
@@ -43,7 +53,7 @@ function Watermark({ number }) {
 }
 
 function TableCard({ table, isSelected, onClick }) {
-  const { name, status, type, openMinutes, itemCount, total, idleMinutes } = table
+  const { name, status, type, openMinutes, itemCount, total, idleMinutes, guestLabel } = table
   const { prefix, number } = splitName(name)
 
   if (status === 'empty') {
@@ -51,7 +61,7 @@ function TableCard({ table, isSelected, onClick }) {
       <div className="table-card table-card--empty" onClick={onClick}>
         <Watermark number={number} />
         <div className="table-card__top-row">
-          <span className="table-card__name-empty">{name}</span>
+          <span className="table-card__name-empty">{guestLabel || name}</span>
           <span className="badge badge--muted">BOŞ</span>
         </div>
         <div className="table-card__bos-label">BOŞ</div>
@@ -115,10 +125,21 @@ function TableCard({ table, isSelected, onClick }) {
         </div>
       </div>
 
-      {/* Table name */}
+      {/* Masa adı. Geçici bir ad verilmişse ("Ziya") o öne çıkar ve masa
+          numarası altında küçük kalır — kasiyer numarayı bilmeden masayı
+          bulabilsin, ama numara da kaybolmasın. */}
       <div className="table-card__name-wrap">
-        <span className="table-card__prefix">{prefix}</span>
-        <span className="table-card__number">{number}</span>
+        {guestLabel ? (
+          <>
+            <span className={`table-card__guest ${guestSizeClass(guestLabel)}`} title={guestLabel}>{guestLabel}</span>
+            <span className="table-card__guest-sub">{name}</span>
+          </>
+        ) : (
+          <>
+            <span className="table-card__prefix">{prefix}</span>
+            <span className="table-card__number">{number}</span>
+          </>
+        )}
       </div>
 
       {/* Time row */}

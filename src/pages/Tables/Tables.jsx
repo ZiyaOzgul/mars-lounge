@@ -6,8 +6,14 @@ import {
   setOrderStatus, consumeIngredients, moveOrderToTable, completeActiveOrder,
   getAllActiveOrders, deleteActiveOrderCascade,
   getDayClosures, insertDayClosure,
+  isDbInitialized,
+  getAllTableLabels,
+  getStaffUidByName,
+  setTableLabel as persistTableLabel,
+  clearTableLabel as persistClearTableLabel,
 } from '../../lib/localDb.js'
 import { hoursSinceLastClosure } from '../../lib/businessDay.js'
+import { PAYMENT_TOLERANCE } from '../../lib/money.js'
 import ConfirmModal from '../../components/ConfirmModal/ConfirmModal.jsx'
 import { addPayments } from '../../lib/orderOperations.js'
 import { supabase, isSupabaseReady } from '../../lib/supabase.js'
@@ -92,6 +98,8 @@ function Tables() {
   // FEATURE — "Masayı İptal Et": onay bekleyen hedef (tüm masa ya da tek grup).
   const [cancelTarget,   setCancelTarget]   = useState(null)
   const [cancelling,     setCancelling]     = useState(false)
+  // Masaya verilen geçici adlar: { [tableId]: "Ziya" } — bkz. table_labels
+  const [tableLabels,    setTableLabels]    = useState({})
   // FIX 3 — ödeme akışı: masa bazlı çift-gönderim kilidi + görünür hata.
   // Ref eşzamanlı (senkron) kontrol için — aynı tık anında iki kez çağrılmayı
   // React state güncellemesinin render'a yansımasını beklemeden engeller.
@@ -289,6 +297,58 @@ function Tables() {
     if (def) setQrTable({ ...def, ...next })
   }
 
+  // Masaya verilen geçici adlar: { [tableId]: "Ziya" }. Yerel-only, masa
+  // boşalınca silinir. tableDefs dolduğunda veritabanı hazır demektir —
+  // ayrı bir dbReady bayrağına gerek yok.
+  useEffect(() => {
+    if (!isDbInitialized()) return
+    try { setTableLabels(getAllTableLabels()) }
+    catch (e) { console.warn('[Tables] masa adları okunamadı', e) }
+  }, [tableDefs.length])
+
+  // Masa boşaldığında adı otomatik sil. Tek yerden bakmak, kapatma /
+  // iptal / taşıma / başka cihazdan kapanma yollarının hepsini kapsar —
+  // her birine ayrı temizlik koymaktan güvenli.
+  //
+  // Sadece "doluydu → boşaldı" GEÇİŞİNDE siliyoruz, "şu an boş" durumunda
+  // değil: kasiyer masayı açmadan önce ad verebiliyor (boş masaya tıkla,
+  // adı yaz, sonra ürün ekle) ve düz boşluk kontrolü o adı daha ilk ürün
+  // girilmeden siliyordu.
+  const prevOccupiedRef = useRef(new Set())
+  useEffect(() => {
+    const now  = new Set(Object.keys(runtimeStates))
+    const prev = prevOccupiedRef.current
+    prevOccupiedRef.current = now
+
+    const closed = [...prev].filter(id => !now.has(id))
+    if (closed.length === 0) return
+
+    setTableLabels(prevLabels => {
+      const hit = closed.filter(id => prevLabels[id])
+      if (hit.length === 0) return prevLabels
+      const next = { ...prevLabels }
+      for (const id of hit) delete next[id]
+      for (const id of hit) {
+        persistClearTableLabel(id).catch(e =>
+          console.warn('[Tables] masa adı silinemedi', id, e))
+      }
+      return next
+    })
+  }, [runtimeStates])
+
+  const handleSetGuestLabel = useCallback((tableId, label) => {
+    const key = String(tableId)
+    const clean = String(label ?? '').trim().slice(0, 24)
+    setTableLabels(prev => {
+      const next = { ...prev }
+      if (clean) next[key] = clean
+      else delete next[key]
+      return next
+    })
+    persistTableLabel(tableId, clean).catch(e =>
+      console.warn('[Tables] masa adı kaydedilemedi', e))
+  }, [])
+
   // Merge tableDefs with runtime states — new tables from Settings appear as empty
   const displayTables = tableDefs.map(def => {
     const state = runtimeStates[def.id] ?? { status: 'empty' }
@@ -300,7 +360,7 @@ function Tables() {
     const idleMinutes = state.status === 'occupied'
       ? computeIdleMinutes({ items: orderItems, openedAt: state.openedAt }, nowTs)
       : 0
-    return { ...def, ...state, orderItems, openMinutes, idleMinutes }
+    return { ...def, ...state, orderItems, openMinutes, idleMinutes, guestLabel: tableLabels[String(def.id)] ?? null }
   })
 
   const visibleTables = tableFilter === 'open'
@@ -886,6 +946,7 @@ function Tables() {
           supabaseOrderId: g.supabaseOrderId ?? null,
           items: g.items,
           total: gTotal,
+          discount: Math.round(gDiscount * 100) / 100,
         })
         infos.push({ group: g, gTotal, ...info })
       }
@@ -965,7 +1026,10 @@ function Tables() {
             orderRemoteId: info.remoteId ? Number(info.remoteId) : null,
             tableId,
             total: info.gTotal,
-            processedBy: transactionData.waiterName ?? null,
+            // Garson ADI değil, Supabase kullanıcı kimliği. Ad zaten
+            // orders.waiter_name'de saklanıyor; buraya ad yazmak ödemenin
+            // hiç senkron olamamasına yol açıyordu (22P02).
+            processedBy: getStaffUidByName(transactionData.waiterName),
             rows: mappedRows,
           })
           info.completed = payRes.completed
@@ -977,22 +1041,37 @@ function Tables() {
         )
       }
 
-      // isFullPayment closes everything in scope even if per-group rounding
-      // left a cent behind
+      // isFullPayment yuvarlama artığı kalsa bile kapsamdaki her şeyi kapatır.
+      // closeWithRemainder ise kasiyerin bilinçli kararı: yuvarlama payını aşan
+      // gerçek bir kalan var ama masa yine de kapatılacak (müşteri gitti vb.).
       const lowStock = []
       let anyClosed = false
       for (const info of infos) {
-        const close = transactionData.isFullPayment || info.completed
+        const close = transactionData.isFullPayment || transactionData.closeWithRemainder || info.completed
         info.close = close
         if (!close) continue
         anyClosed = true
         const gSub = groupSubtotal(info.group.items)
+        const panelDiscount = allSub > 0 ? Math.round(discount * (gSub / allSub) * 100) / 100 : 0
+
+        // Tahsil edilmeyen fark indirim olarak yazılır ve sipariş tutarı
+        // gerçekten alınan paraya çekilir — yoksa ciro, kasaya hiç girmemiş
+        // bir parayı girmiş gibi gösterir. Yuvarlama payının altındaki fark
+        // yok sayılır, böylece normal kapanışlarda davranış birebir aynı kalır.
+        const paidForGroup = getOrderTotalPaid(info.orderId)
+        const rawShort = gSub - panelDiscount - paidForGroup
+        const shortfall = rawShort > PAYMENT_TOLERANCE ? Math.round(rawShort * 100) / 100 : 0
+
         await completeActiveOrder(info.orderId, {
           subtotal: gSub,
           tax: 0,
-          discount: allSub > 0 ? Math.round(discount * (gSub / allSub) * 100) / 100 : 0,
+          discount: Math.round((panelDiscount + shortfall) * 100) / 100,
+          total: shortfall > 0 ? Math.round((gSub - panelDiscount - shortfall) * 100) / 100 : null,
           closedAt: transactionData.closedAt,
         })
+        if (shortfall > 0) {
+          console.warn(`[Tables] Masa ${tableId} kalanla kapatıldı — ${shortfall.toFixed(2)} ₺ indirim olarak yazıldı`)
+        }
         const warnings = consumeIngredients(info.group.items ?? [])
         if (warnings?.length) lowStock.push(...warnings)
       }
@@ -1252,6 +1331,7 @@ function Tables() {
           onMoveItemsToTable={handleMoveItemsToTable}
           onSetDiscount={handleSetDiscount}
           onCancelTable={requestCancelTable}
+          onSetGuestLabel={handleSetGuestLabel}
           onPayOrder={(tableId, subOrderLocalId) => {
             const tbl = displayTables.find(t => t.id === tableId)
             const order = (runtimeStates[tableId]?.orders ?? []).find(o => o.localId === subOrderLocalId)

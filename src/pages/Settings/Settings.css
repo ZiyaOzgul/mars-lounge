@@ -1347,3 +1347,83 @@
   background: var(--color-danger-light); border-color: var(--color-danger);
   color: var(--color-danger);
 }
+
+/* ── Veritabanı yedekleri (Sistem kartı) ─────────────────────────── */
+.st-backup {
+  padding-bottom: 20px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.st-backup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.st-backup-btn {
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 14px;
+  border-radius: var(--radius-input);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-card);
+  color: var(--color-text-primary);
+  cursor: pointer;
+}
+
+.st-backup-btn:hover:not(:disabled) {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.st-backup-btn--primary {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: #fff;
+}
+
+.st-backup-btn--primary:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
+  color: #fff;
+}
+
+.st-backup-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.st-backup-msg {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.st-backup-list {
+  margin-top: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-input);
+  overflow: hidden;
+}
+
+.st-backup-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 7px 12px;
+  font-size: 12px;
+  color: var(--color-text-primary);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.st-backup-row:last-child { border-bottom: none; }
+
+.st-backup-size { color: var(--color-text-muted); }
+
+.st-backup-row--more {
+  justify-content: center;
+  color: var(--color-text-muted);
+}

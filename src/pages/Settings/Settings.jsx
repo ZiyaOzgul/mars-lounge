@@ -850,6 +850,37 @@ function Settings() {
   // ── Cafe info: auto-save (debounced) + "Kaydedildi" toast ──────
   const [cafeInfo, setCafeInfo] = useState(loadCafeInfo);
   const [savedToast, setSavedToast] = useState(false);
+
+  // ── Veritabanı yedekleri ────────────────────────────────────────
+  // Yedekler ana süreçte otomatik alınıyor; buradaki arayüz sadece
+  // görünürlük ve elle yedek için. Liste okunamıyorsa (tarayıcıda
+  // çalışıyorsa electronAPI yok) sessizce boş kalır.
+  const [backups, setBackups] = useState([]);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupMsg, setBackupMsg] = useState(null);
+
+  const refreshBackups = async () => {
+    if (!window.electronAPI?.backup?.list) return;
+    try { setBackups((await window.electronAPI.backup.list()) ?? []); }
+    catch (e) { console.warn("[Settings] yedek listesi okunamadı", e); }
+  };
+
+  useEffect(() => { refreshBackups(); }, []);
+
+  const handleBackupNow = async () => {
+    if (!window.electronAPI?.backup?.now) return;
+    setBackupBusy(true);
+    setBackupMsg(null);
+    try {
+      const res = await window.electronAPI.backup.now();
+      setBackupMsg(res?.ok ? "Yedek alındı." : `Yedek alınamadı: ${res?.error ?? "bilinmeyen hata"}`);
+      await refreshBackups();
+    } catch (e) {
+      setBackupMsg(`Yedek alınamadı: ${e.message ?? String(e)}`);
+    } finally {
+      setBackupBusy(false);
+    }
+  };
   const saveTimerRef = useRef(null);
   const toastTimerRef = useRef(null);
   const handleCafeChange = (field, value) => {
@@ -1331,6 +1362,57 @@ function Settings() {
                 </span>
                 Sistem
               </h2>
+              <div className="st-backup">
+                <label className="settings-label">Veritabanı Yedekleri</label>
+                <p className="st-point-desc">
+                  Yerel veritabanı otomatik yedekleniyor: uygulama açıldığında,
+                  her 6 saatte bir ve gece bakımında. Son 14 günün yedekleri
+                  saklanır, en yeni 3 tanesi her hâlükârda korunur.
+                </p>
+                <div className="st-backup-actions">
+                  <button
+                    type="button"
+                    className="st-backup-btn st-backup-btn--primary"
+                    onClick={handleBackupNow}
+                    disabled={backupBusy}
+                  >
+                    {backupBusy ? "Yedekleniyor…" : "Şimdi Yedek Al"}
+                  </button>
+                  <button
+                    type="button"
+                    className="st-backup-btn"
+                    onClick={() => window.electronAPI?.backup?.open?.()}
+                  >
+                    Yedek Klasörünü Aç
+                  </button>
+                  <button
+                    type="button"
+                    className="st-backup-btn"
+                    onClick={() => window.electronAPI?.logs?.reveal?.()}
+                  >
+                    Log Dosyasını Göster
+                  </button>
+                </div>
+                {backupMsg && <p className="st-backup-msg">{backupMsg}</p>}
+                {backups.length > 0 ? (
+                  <div className="st-backup-list">
+                    {backups.slice(0, 5).map((b) => (
+                      <div key={b.name} className="st-backup-row">
+                        <span>{new Date(b.mtime).toLocaleString("tr-TR")}</span>
+                        <span className="st-backup-size">{(b.size / 1024).toFixed(0)} KB</span>
+                      </div>
+                    ))}
+                    {backups.length > 5 && (
+                      <div className="st-backup-row st-backup-row--more">
+                        +{backups.length - 5} yedek daha
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <p className="st-backup-msg">Henüz yedek alınmadı.</p>
+                )}
+              </div>
+
               <div className="st-sistem-grid">
                 <div>
                   <label className="settings-label">Mars Lounge Puanı</label>

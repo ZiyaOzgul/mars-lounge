@@ -5,6 +5,7 @@ import { useApp } from '../../context/AppContext.jsx'
 import DiscountEditor from '../shared/DiscountEditor.jsx'
 import { hasPerm } from '../../lib/permissions.js'
 import { buildDisplayRows } from '../../lib/itemGrouping.js'
+import { isFullyPaid, isOverpaid, remainingOf } from '../../lib/money.js'
 import './PaymentModal.css'
 
 const MODES = [
@@ -316,8 +317,20 @@ function PaymentModal({
     .reduce((sum, r) => sum + r.amount, 0)
 
   const commitAmount = paymentsToCommit.reduce((s, r) => s + r.amount, 0)
-  const commitOverflow = commitAmount > total + 0.001
-  const isFullPayment = commitAmount + 0.001 >= total
+  // Aynı yuvarlama payı orderOperations.js'teki kapanış kararıyla
+  // paylaşılıyor — ikisi ayrı sabitler olduğunda buton "Tahsil & Kapat"
+  // derken sipariş kapanmayabiliyordu.
+  const commitOverflow = isOverpaid(commitAmount, total)
+  const isFullPayment = isFullyPaid(commitAmount, total)
+  // Yuvarlama payını aşan gerçek kalan (43 kuruş gibi). Bu tutar için
+  // kasiyerin bilinçli bir kararı gerekiyor — sessizce silinmiyor.
+  const remainingAfterCommit = remainingOf(commitAmount, total)
+  // Kasiyer "kalanı sil, masayı kapat" dediyse true. Kalan ortadan
+  // kalkarsa (tutar değiştirildi) kendiliğinden düşer — yoksa kutu işaretli
+  // kalır ve bir sonraki tahsilatta farkında olmadan devreye girer.
+  const [closeWithRemainder, setCloseWithRemainder] = useState(false)
+  const willClose = isFullPayment || (remainingAfterCommit > 0 && closeWithRemainder)
+  if (closeWithRemainder && remainingAfterCommit === 0) setCloseWithRemainder(false)
   const canComplete = !commitOverflow && commitAmount > 0 && (
     selectionActive || mode !== 'single' || singleMethod !== 'cash' || enteredAmount >= payableTotal
   ) && (!hasVeresiye || trimmedVeresiyeName.length > 0)
@@ -461,6 +474,10 @@ function PaymentModal({
       change:           !selectionActive && mode === 'single' && singleMethod === 'cash' ? change : 0,
       paymentRows:      paymentsToCommit,
       isFullPayment,
+      // Yuvarlama payını aşan kalana rağmen kapatma kararı. Tables.jsx
+      // bu farkı indirim olarak yazıp sipariş tutarını alınan paraya
+      // çekiyor — ciroya girmemiş para girmiş gibi görünmesin.
+      closeWithRemainder: remainingAfterCommit > 0 && closeWithRemainder,
       alreadyPaid:      paidSoFar,
       fullTotal,
       closedAt:         new Date().toISOString(),
@@ -984,6 +1001,24 @@ function PaymentModal({
               </div>
             )}
 
+            {/* Yuvarlama payını aşan gerçek bir kalan var: sessizce
+                silmiyoruz, kasiyerin açık kararını istiyoruz. */}
+            {remainingAfterCommit > 0 && commitAmount > 0 && (
+              <label className="pm-remainder">
+                <input
+                  type="checkbox"
+                  checked={closeWithRemainder}
+                  onChange={e => setCloseWithRemainder(e.target.checked)}
+                />
+                <span className="pm-remainder__text">
+                  <span><strong>{fmt(remainingAfterCommit)}</strong> kalıyor — kalanı sil, masayı kapat</span>
+                  <span className="pm-remainder__hint">
+                    Bu tutar indirim olarak kaydedilir, ciroya eklenmez.
+                  </span>
+                </span>
+              </label>
+            )}
+
             {/* Commit summary */}
             <div className="pm-commit-summary">
               <span>TAHSİL EDİLECEK</span>
@@ -997,7 +1032,7 @@ function PaymentModal({
               onClick={handleComplete}
               disabled={!canComplete || submitting}
             >
-              {submitting ? 'İşleniyor…' : (isFullPayment ? 'Tahsil & Kapat' : 'Tahsil Et')}
+              {submitting ? 'İşleniyor…' : (willClose ? 'Tahsil & Kapat' : 'Tahsil Et')}
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                 <line x1="5" y1="12" x2="19" y2="12" />
                 <polyline points="12 5 19 12 12 19" />

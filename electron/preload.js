@@ -8,6 +8,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
     readBackup: ()     => ipcRenderer.invoke('db-read-backup'),
     write:      (data) => ipcRenderer.invoke('db-write', data),
   },
+  // Tarihli yedekler. Otomatik alınıyor (açılış + 6 saatte bir kontrol +
+  // gece bakımı); buradakiler kullanıcının elle alıp klasörü açabilmesi için.
+  backup: {
+    now:  () => ipcRenderer.invoke('backup:now'),
+    list: () => ipcRenderer.invoke('backup:list'),
+    open: () => ipcRenderer.invoke('backup:open'),
+  },
+  // Donma/çökme incelemesi için log dosyasını Explorer'da göster.
+  logs: {
+    reveal: () => ipcRenderer.invoke('logs:reveal'),
+  },
   images: {
     pickAndSave: async () => {
       const srcPath = await ipcRenderer.invoke('images:pick')

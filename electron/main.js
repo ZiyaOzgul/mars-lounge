@@ -2,8 +2,25 @@ const { app, BrowserWindow, ipcMain, dialog, Menu, protocol, net, shell } = requ
 const { autoUpdater } = require('electron-updater')
 const path = require('path')
 const fs   = require('fs')
+// Yedekleme async fs kullaniyor: kopyalama ana sureci bloklamamali —
+// senkron disk islemleri tam olarak kacindigimiz donma sebebi.
+const fsp  = require('fs').promises
 
 const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000
+
+// İndirilmiş ama henüz kurulmamış sürüm. electron-updater güncellemeyi
+// YALNIZCA uygulama kapanırken kuruyor (autoInstallOnAppQuit). Bu kasa hiç
+// kapatılmıyor — uygulama günlerce açık kalıyor — ve "Şimdi Yeniden Başlat"
+// penceresi servis sırasında çıktığında doğal olarak "Daha Sonra"
+// seçiliyor. Sonuç: yayınlanan sürüm aylarca kurulmayabiliyor.
+//
+// Bu gerçek bir vakadır: v1.3.2 12 Eylül'de yayınlandı, müşteri 15 Eylül'de
+// hâlâ v1.3.1 kullanıyordu (userData'da logs/ klasörünün hiç oluşmamış
+// olmasından anlaşıldı — dosya loglaması v1.3.2 ile gelmişti).
+//
+// Çözüm: gece bakım penceresinde, kasiyer onay verdiğinde, bekleyen bir
+// güncelleme varsa reload yerine kurulum yapılıyor.
+let pendingUpdate = null
 
 protocol.registerSchemesAsPrivileged([
   { scheme: 'app-image', privileges: { standard: true, secure: true, supportFetchAPI: true, bypassCSP: true, stream: true } },
@@ -47,6 +64,10 @@ function setupAutoUpdater() {
   autoUpdater.autoInstallOnAppQuit = true
 
   autoUpdater.on('update-downloaded', async (info) => {
+    // Gece bakımı bunu görüp kurulumu kendisi tamamlayacak — bkz.
+    // pendingUpdate ve requestMaintenanceReload.
+    pendingUpdate = info.version || 'bilinmiyor'
+    logLine(`[auto-updater] v${pendingUpdate} indirildi — kurulum yeniden baslatmayi bekliyor`)
     const { response } = await dialog.showMessageBox({
       type: 'info',
       title: 'Güncelleme Hazır',
@@ -58,6 +79,8 @@ function setupAutoUpdater() {
 
     if (response === 0) {
       autoUpdater.quitAndInstall()
+    } else {
+      logLine('[auto-updater] kullanici "Daha Sonra" dedi — gece bakiminda otomatik kurulacak')
     }
   })
 
@@ -125,18 +148,19 @@ function createWindow() {
     recoveryTimestamps = recoveryTimestamps.filter((t) => now - t < CRASH_LOOP_WINDOW_MS)
 
     if (recoveryTimestamps.length >= CRASH_LOOP_MAX) {
-      console.error(
-        `[${new Date().toISOString()}] [render-process-gone] son ${CRASH_LOOP_WINDOW_MS / 60000} dakika içinde ${CRASH_LOOP_MAX}'ten fazla çöküş oldu — crash loop koruması devrede, otomatik yeniden yükleme durduruldu`
+      logLine(
+        `[render-process-gone] son ${CRASH_LOOP_WINDOW_MS / 60000} dakika icinde ${CRASH_LOOP_MAX}'ten fazla cokus oldu — crash loop korumasi devrede, otomatik yeniden yukleme durduruldu`,
+        'error'
       )
       return
     }
 
     recoveryTimestamps.push(now)
-    console.error(`[${new Date().toISOString()}] [render-process-gone] pencere otomatik olarak yeniden yükleniyor`)
+    logLine('[render-process-gone] pencere otomatik olarak yeniden yukleniyor', 'error')
     try {
       win.reload()
     } catch (err) {
-      console.error('[render-process-gone] reload başarısız:', err)
+      logLine(`[render-process-gone] reload basarisiz: ${err && err.message}`, 'error')
     }
   })
 
@@ -144,12 +168,19 @@ function createWindow() {
   // sürüyor olabilir) — burada zorla reload/kill YAPMIYORUZ, çünkü bu
   // kaydedilmemiş bir işlemi yok edebilir. Sadece logluyoruz; responsive
   // ile birlikte süresi loglardan görülebilir.
+  // Donma suresini olcebilmek icin baslangici sakliyoruz — log dosyasinda
+  // "5 dakika dondu" ile "200 ms takildi" ayirt edilebilsin.
+  let unresponsiveSince = null
+
   win.on('unresponsive', () => {
-    console.error(`[${new Date().toISOString()}] [unresponsive] pencere yanıt vermiyor — otomatik müdahale yapılmıyor`)
+    unresponsiveSince = Date.now()
+    logLine('[unresponsive] pencere yanit vermiyor — otomatik mudahale yapilmiyor', 'error')
   })
 
   win.on('responsive', () => {
-    console.error(`[${new Date().toISOString()}] [responsive] pencere tekrar yanıt veriyor`)
+    const ms = unresponsiveSince ? Date.now() - unresponsiveSince : null
+    unresponsiveSince = null
+    logLine(`[responsive] pencere tekrar yanit veriyor${ms !== null ? ` — ${(ms / 1000).toFixed(1)} sn donuk kaldi` : ''}`, 'error')
   })
 
   // ── Gece bakım reload'u (05:00) ────────────────────────────────────
@@ -165,6 +196,20 @@ function createWindow() {
   // ya da çürütmek için kullanılır.
   const memoryTimer = setInterval(() => logRendererMemory(win), MEMORY_LOG_INTERVAL_MS)
   win.once('closed', () => clearInterval(memoryTimer))
+
+  // ── Otomatik yedekler ────────────────────────────────────────────
+  // Bu PC hiç yeniden başlatılmıyor — uygulama günlerce açık kalıyor. Bu
+  // yüzden asıl iş yapan tetikleyici periyodik olan; açılıştaki yedek
+  // yalnızca kurulum/güncelleme sonrası ilk turu yakalıyor.
+  // takeBackup kendi aralık kontrolünü yapıyor (12 saat), o yüzden bu
+  // timer'ın sık çalışması fazladan dosya üretmiyor.
+  const BACKUP_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000
+  const backupTimer = setInterval(() => {
+    takeBackup('periyodik').catch((e) => logLine(`[backup] periyodik yedek hatasi: ${e && e.message}`, 'error'))
+  }, BACKUP_CHECK_INTERVAL_MS)
+  win.once('closed', () => clearInterval(backupTimer))
+
+  // (Açılış yedeği artık whenReady içinde, renderer başlamadan önce alınıyor.)
   // Ilk olcum renderer sureci ayaga kalktiktan SONRA alinmali —
   // createWindow icinde hemen cagrilirsa surec henuz getAppMetrics'te
   // gorunmez ve 'bilinmiyor' yazar.
@@ -228,19 +273,24 @@ function requestMaintenanceReload(win) {
   // tetiklenebilirdi. Pencere kapandiysa yarina birakiyoruz.
   const hour = new Date().getHours()
   if (hour < MAINTENANCE_HOUR || hour >= MAINTENANCE_HOUR + MAINTENANCE_WINDOW_HOURS) {
-    console.log(`[${new Date().toISOString()}] [maintenance] bakim penceresi disinda (saat ${hour}) — yarin 0${MAINTENANCE_HOUR}:00'e erteleniyor`)
+    logLine(`[maintenance] bakim penceresi disinda (saat ${hour}) — yarin 0${MAINTENANCE_HOUR}:00'e erteleniyor`)
     scheduleMaintenanceReload(win, msUntilNextMaintenance())
     return
   }
 
-  console.log(`[${new Date().toISOString()}] [maintenance] gece bakım reload'u isteniyor`)
+  // Reload'dan ÖNCE yedek: bakım penceresi günün en sakin anı ve reload
+  // her zaman sorunsuz geçmeyebilir — sağlam bir kuşak diskte dursun.
+  takeBackup('gece bakimi', { force: true })
+    .catch((e) => logLine(`[backup] gece yedegi hatasi: ${e && e.message}`, 'error'))
+
+  logLine("[maintenance] gece bakim reload'u isteniyor")
 
   let settled = false
   const timer = setTimeout(() => {
     if (settled) return
     settled = true
     ipcMain.removeAllListeners('maintenance-reload-approved')
-    console.log(`[${new Date().toISOString()}] [maintenance] onay alınamadı (60sn) — bakım bu sefer atlandı, 30 dk sonra tekrar denenecek`)
+    logLine('[maintenance] onay alinamadi (60sn) — bakim bu sefer atlandi, 30 dk sonra tekrar denenecek')
     scheduleMaintenanceReload(win, MAINTENANCE_RETRY_MS)
   }, MAINTENANCE_APPROVAL_TIMEOUT_MS)
 
@@ -248,11 +298,27 @@ function requestMaintenanceReload(win) {
     if (settled) return
     settled = true
     clearTimeout(timer)
-    console.log(`[${new Date().toISOString()}] [maintenance] onaylandı — pencere yeniden yükleniyor`)
+
+    // Bekleyen güncelleme varsa bakım penceresi onu kurmak için en güvenli
+    // an: kasiyer onay verdi, masalar boş, gün kapandı. quitAndInstall
+    // uygulamayı kapatıp yeni sürümle yeniden açar.
+    if (pendingUpdate) {
+      logLine(`[maintenance] onaylandi — bekleyen guncelleme v${pendingUpdate} kuruluyor`)
+      try {
+        // isSilent=true, isForceRunAfter=true → sessiz kurulum, sonra
+        // uygulamayi otomatik baslat. Kasiyerin hicbir sey yapmasi gerekmez.
+        autoUpdater.quitAndInstall(true, true)
+        return
+      } catch (err) {
+        logLine(`[maintenance] guncelleme kurulamadi, normal reload'a donuluyor: ${err && err.message}`, 'error')
+      }
+    }
+
+    logLine('[maintenance] onaylandi — pencere yeniden yukleniyor')
     try {
       win.reload()
     } catch (err) {
-      console.error('[maintenance] reload başarısız:', err)
+      logLine(`[maintenance] reload basarisiz: ${err && err.message}`, 'error')
     }
     scheduleMaintenanceReload(win, msUntilNextMaintenance())
   })
@@ -260,7 +326,7 @@ function requestMaintenanceReload(win) {
   try {
     win.webContents.send('maintenance-reload-request')
   } catch (err) {
-    console.error('[maintenance] istek renderer’a gönderilemedi:', err)
+    logLine(`[maintenance] istek renderer'a gonderilemedi: ${err && err.message}`, 'error')
     settled = true
     clearTimeout(timer)
     ipcMain.removeAllListeners('maintenance-reload-approved')
@@ -424,6 +490,129 @@ ipcMain.handle('db-write', (event, data) => {
   }
 })
 
+// ── Tarihli yedekler ───────────────────────────────────────────────
+// .bak tek bir kuşak tutuyor ve HER yazmada üzerine yazılıyor: bozulma iki
+// kez diske inerse sağlam kopya diye bir şey kalmıyor. Burası tarihli,
+// dokunulmayan anlık görüntüler tutuyor.
+//
+// Kapsam sınırı bilinçli: bu yedekler yerel diskte duruyor, yani dosya
+// bozulmasına karşı koruyor — PC'nin komple gitmesine karşı DEĞİL. Satış
+// verisi (siparişler, kalemler, ödemeler) zaten Supabase'de; buradaki
+// yedeğin asıl değeri yalnızca yerelde yaşayan şeyler (masa tanımları,
+// masa adları, çevrimdışı kimlik bilgileri, meta bayrakları) ve sunucuya
+// henüz gitmemiş kayıtlar.
+const BACKUP_DIR = () => path.join(app.getPath('userData'), 'backups')
+const BACKUP_KEEP_DAYS = 14
+const BACKUP_KEEP_MIN = 3          // eski olsalar bile son N tanesi hep kalır
+const BACKUP_MIN_INTERVAL_MS = 12 * 60 * 60 * 1000
+const SQLITE_MAGIC = 'SQLite format 3\u0000'
+
+function backupStamp(d = new Date()) {
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}`
+}
+
+async function listBackups() {
+  try {
+    const dir = BACKUP_DIR()
+    const names = (await fsp.readdir(dir)).filter((n) => n.endsWith('.db'))
+    const rows = []
+    for (const name of names) {
+      try {
+        const st = await fsp.stat(path.join(dir, name))
+        rows.push({ name, size: st.size, mtime: st.mtimeMs })
+      } catch { /* yaris: dosya az once silinmis olabilir */ }
+    }
+    return rows.sort((a, b) => b.mtime - a.mtime)
+  } catch {
+    return [] // klasor henuz yok
+  }
+}
+
+// Bozuk bir dosyayi yedeklemek, saglam yedekleri emekliye ayirdigi icin
+// hic yedek almamaktan daha kotu. Tam dogrulama ana surecte mumkun degil
+// (sqlite yok), ama ucuz iki kontrol en yaygin bozulmayi eliyor:
+// baslik imzasi ve makul boyut.
+function looksLikeSqlite(buf) {
+  return buf.length >= 512 && buf.slice(0, 16).toString('utf8') === SQLITE_MAGIC
+}
+
+async function pruneBackups() {
+  const rows = await listBackups()
+  const cutoff = Date.now() - BACKUP_KEEP_DAYS * 86400_000
+  const stale = rows.slice(BACKUP_KEEP_MIN).filter((r) => r.mtime < cutoff)
+  for (const r of stale) {
+    try { await fsp.unlink(path.join(BACKUP_DIR(), r.name)) }
+    catch (e) { logLine(`[backup] eski yedek silinemedi (${r.name}): ${e && e.message}`, 'error') }
+  }
+  return stale.length
+}
+
+// force=true: kullanici elle istedi, aralik kontrolu atlanir.
+async function takeBackup(reason, { force = false } = {}) {
+  try {
+    const src = DB_FILE()
+    let buf
+    try { buf = await fsp.readFile(src) }
+    catch { return { ok: false, error: 'Veritabani dosyasi henuz yok' } }
+
+    if (!looksLikeSqlite(buf)) {
+      logLine('[backup] ATLANDI: veritabani dosyasi gecerli bir SQLite dosyasina benzemiyor', 'error')
+      return { ok: false, error: 'Veritabani dosyasi gecersiz gorunuyor — yedek alinmadi' }
+    }
+
+    if (!force) {
+      const [newest] = await listBackups()
+      if (newest && Date.now() - newest.mtime < BACKUP_MIN_INTERVAL_MS) {
+        return { ok: true, skipped: true, reason: 'son yedek yeterince yeni' }
+      }
+    }
+
+    const dir = BACKUP_DIR()
+    await fsp.mkdir(dir, { recursive: true })
+    const name = `san-lucas-${backupStamp()}.db`
+    const dest = path.join(dir, name)
+    const tmp = dest + '.tmp'
+    // tmp + rename: yarim yazilmis bir dosya asla .db uzantisiyla gorunmez,
+    // yani listeye gecerli bir yedekmis gibi girmez.
+    await fsp.writeFile(tmp, buf)
+    await fsp.rename(tmp, dest)
+
+    const pruned = await pruneBackups()
+    logLine(`[backup] ${name} olusturuldu (${(buf.length / 1024).toFixed(0)} KB, sebep: ${reason})${pruned ? ` — ${pruned} eski yedek silindi` : ''}`)
+    return { ok: true, name, size: buf.length }
+  } catch (e) {
+    logLine(`[backup] BASARISIZ: ${e && e.message}`, 'error')
+    return { ok: false, error: String((e && e.message) || e) }
+  }
+}
+
+ipcMain.handle('backup:now', (_e, opts) => takeBackup('elle', { force: true, ...(opts || {}) }))
+ipcMain.handle('backup:list', () => listBackups())
+ipcMain.handle('backup:open', async () => {
+  try {
+    await fsp.mkdir(BACKUP_DIR(), { recursive: true })
+    await shell.openPath(BACKUP_DIR())
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) }
+  }
+})
+
+// Log klasoru — donma/cokme incelemesinde kasiyerden dosya istemek icin.
+// Handler main.js'te vardi ama preload'da acik degildi, yani hicbir yerden
+// cagrilamiyordu.
+ipcMain.handle('logs:reveal', async () => {
+  try {
+    const file = logFilePath()
+    await fsp.mkdir(path.dirname(file), { recursive: true })
+    shell.showItemInFolder(file)
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) }
+  }
+})
+
 // ── Product image helpers ─────────────────────────────────────────
 ipcMain.handle('images:pick', async (event) => {
   const win = BrowserWindow.fromWebContents(event.sender)
@@ -580,7 +769,7 @@ ipcMain.handle('printers:printReceipt', (_event, { printerName, html } = {}) => 
   })
 })
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   protocol.handle('app-image', async (request) => {
     try {
       const u = new URL(request.url)
@@ -594,6 +783,29 @@ app.whenReady().then(() => {
       return new Response(null, { status: 404 })
     }
   })
+
+  // ── Açılış öncesi kurtarma noktası ───────────────────────────────
+  // Renderer başlamadan ÖNCE, hiçbir şey veritabanına dokunmadan bir kopya
+  // alıyoruz. Sıralama önemli: initDb açılışta doğrulama yapıyor ve bozuk
+  // bulursa .bak'a düşüyor — yani dosyayı değiştiren ilk işlem o. Periyodik
+  // yedek 90 saniye sonra çalışsaydı, riskli adım çoktan geçmiş olurdu.
+  //
+  // Özellikle bir SÜRÜM GÜNCELLEMESİNDEN sonraki ilk açılışta değerli:
+  // yeni sürüm veritabanına ne yaparsa yapsın, öncesinin kopyası diskte
+  // durur. force:true — aralık kontrolünü atlıyoruz, bu yedek her açılışta
+  // alınmalı.
+  // AWAIT şart: createWindow() renderer'ı başlatıyor ve renderer initDb
+  // ile veritabanına dokunan ilk şey oluyor. Beklemezsek "hiçbir şey
+  // dokunmadan önce kopya al" garantisi garanti olmaktan çıkıp yarışa
+  // dönüşür. Maliyeti bir dosya kopyası (~1 MB, birkaç ms).
+  try {
+    const res = await takeBackup('acilis-oncesi', { force: true })
+    if (res?.ok && !res.skipped) logLine('[backup] acilis oncesi kurtarma noktasi hazir')
+    else if (!res?.ok) logLine(`[backup] acilis oncesi yedek alinamadi: ${res?.error}`, 'error')
+  } catch (e) {
+    // Yedek alınamaması uygulamayı açılmaktan alıkoymamalı.
+    logLine(`[backup] acilis oncesi yedek hatasi: ${e && e.message}`, 'error')
+  }
 
   createWindow()
   setupAutoUpdater()

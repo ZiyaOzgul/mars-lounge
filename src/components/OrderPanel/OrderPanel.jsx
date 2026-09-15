@@ -86,6 +86,7 @@ function OrderPanel({
   table, tables = [],
   onClose, onCloseTable, onAddItem, onUpdateNote, onRemoveItem,
   onPayOrder, onNewGroup, onMoveWholeTable, onMoveItemsToTable, onSetDiscount, onCancelTable,
+  onSetGuestLabel,
 }) {
   const { products, categories, productVariants, currentUser } = useApp()
   const canDiscount = hasPerm(currentUser, 'apply_discount')
@@ -100,6 +101,22 @@ function OrderPanel({
   // Customize modal flow (variant + modifiers + qty, single combined modal)
   const [customizeModal, setCustomizeModal] = useState(null)
   // customizeModal = { mode:'add'|'edit', product, variants?, basePrice, initialModifiers, editTarget?:{orderId,itemId} }
+
+  // Masaya verilen geçici ad ("Ziya"). Opsiyonel — boş bırakılırsa masa
+  // numarasıyla görünmeye devam eder. labelDraft yalnızca düzenleme
+  // açıkken yaşar; kaydetme anında üst tarafa (Tables) veriliyor.
+  const [labelEditing, setLabelEditing] = useState(false)
+  const [labelDraft,   setLabelDraft]   = useState('')
+
+  const openLabelEditor = () => {
+    setLabelDraft(table.guestLabel ?? '')
+    setLabelEditing(true)
+  }
+  const commitLabel = () => {
+    setLabelEditing(false)
+    const next = labelDraft.trim()
+    if (next !== (table.guestLabel ?? '')) onSetGuestLabel?.(table.id, next)
+  }
 
   // Transfer flow
   const [selectionMode,    setSelectionMode]    = useState(false)
@@ -413,7 +430,35 @@ function OrderPanel({
           {/* Header */}
           <div className="om-left__header">
             <div className="om-left__title">
-              <span>{table.name}</span>
+              {labelEditing ? (
+                <input
+                  className="om-guest-input"
+                  autoFocus
+                  maxLength={24}
+                  placeholder="Masaya ad ver (örn. Ziya)"
+                  value={labelDraft}
+                  onChange={e => setLabelDraft(e.target.value)}
+                  onBlur={commitLabel}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') commitLabel()
+                    if (e.key === 'Escape') setLabelEditing(false)
+                  }}
+                />
+              ) : (
+                <button
+                  type="button"
+                  className="om-guest-btn"
+                  onClick={openLabelEditor}
+                  title={table.guestLabel ? 'Adı düzenle' : 'Masaya geçici ad ver'}
+                >
+                  <span className="om-guest-btn__name">{table.guestLabel || table.name}</span>
+                  {table.guestLabel && <span className="om-guest-btn__sub">{table.name}</span>}
+                  <svg className="om-guest-btn__pencil" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 20h9" />
+                    <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                  </svg>
+                </button>
+              )}
               <span className={`badge ${isOccupied ? 'badge--success' : 'badge--muted'}`}>
                 {isOccupied ? 'Açık' : 'Boş'}
               </span>

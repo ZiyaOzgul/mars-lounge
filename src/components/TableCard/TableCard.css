@@ -158,6 +158,43 @@
   line-height: 1;
 }
 
+/* Masaya verilen geçici ad. Numaranın yerine değil, önüne geçer:
+   ad büyük, masa numarası hemen altında küçük kalır. Uzun adlar
+   kartı bozmasın diye tek satırda kırpılıyor. */
+.table-card__name-wrap:has(.table-card__guest) {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.table-card__guest {
+  text-transform: uppercase;
+  font-weight: 800;
+  color: var(--color-text-primary);
+  line-height: 1.1;
+  max-width: 100%;
+  /* Kırpmak yerine en fazla iki satıra sar — ad okunabilir kalsın.
+     Üçüncü satıra taşarsa yine … ile biter. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.table-card__guest--lg { font-size: 26px; }
+.table-card__guest--md { font-size: 19px; }
+.table-card__guest--sm { font-size: 15px; letter-spacing: 0.2px; }
+
+.table-card__guest-sub {
+  text-transform: uppercase;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  color: var(--color-text-muted);
+  line-height: 1;
+}
+
 .table-card__prefix {
   text-transform: uppercase;
   font-size: 14px;

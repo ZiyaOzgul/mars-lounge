@@ -46,6 +46,18 @@
   margin-bottom: 20px;
 }
 
+/* Otomatik onarim geri sayimi — WASM tuzagi ekraninda gosterilir. */
+.error-boundary__countdown {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-accent);
+  background: var(--color-accent-light);
+  border-radius: var(--radius-pill);
+  padding: 8px 14px;
+  margin-bottom: 20px;
+  display: inline-block;
+}
+
 .error-boundary__details {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-input);

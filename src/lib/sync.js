@@ -18,6 +18,7 @@ import {
   reconcileRemoteDeletions,
   getActiveRemoteOrders, upsertPaymentFromRemote, upsertPaymentItemFromRemote,
   mirrorRemoteOrderStatus, upsertRemoteActiveOrder,
+  closeLocalOrderFromRemote, getAllActiveOrders, getMeta, setMeta, isUuid,
   filterUnknownRemoteOrders, insertRemoteCompletedOrder,
   getAllIngredients, markIngredientSynced,
   getUnsyncedVariants, markVariantSynced,
@@ -45,9 +46,29 @@ function fmtErr(e) {
   return parts.length ? parts.join(' | ') : String(e)
 }
 
-// Başka cihazlarda kapatılmış satışların geriye dönük çekileceği pencere.
-// Raporlar bu aralıktaki mobil satışları da görür; daha eskisi zaten yereldedir.
+// Rutin turda başka cihazlarda kapatılmış satışların geriye dönük çekileceği
+// pencere. Her 60 saniyede bir tüm geçmişin id listesini çekmemek için kısa
+// tutuluyor — tam geçmiş, aşağıdaki tek seferlik geri dolumla geliyor.
 const COMPLETED_PULL_WINDOW_DAYS = 30
+
+// Tek seferlik tam geri dolum bayrağı (yerel meta tablosunda).
+//
+// Neden gerekli: yerel dosya bozulup .bak'tan ya da sıfırdan kurulduğunda,
+// 30 günlük pencere yüzünden daha eski geçmiş BİR DAHA GERİ GELMİYORDU.
+// Bugün bu 5 günlük kayıp demek (ilk sipariş 10 Ağustos); altı ay sonra
+// aynı kaza beş aylık geçmişi siler. Bayrak yoksa geçmişin tamamı bir kez
+// çekilir ve yerel dosya "yeri doldurulamaz" olmaktan çıkıp "yeniden
+// kurulabilir" hâle gelir.
+const COMPLETED_BACKFILL_KEY = 'completed-backfill-v1'
+
+// PostgREST tek istekte sınırlı sayıda satır döndürür ve fazlasını sessizce
+// keser. Son 30 günde 1.408 kapanmış sipariş var — sınır zaten aşılmış
+// durumdaydı, yani bazı satışlar hiçbir zaman çekilmiyordu. Artık sayfalıyoruz.
+const PULL_PAGE_SIZE = 500
+
+// .in(...) filtresi sorgu dizesine giriyor; binlerce id URL'i uzunluk
+// sınırının ötesine taşırıp isteği komple düşürür. Parçalayarak gönderiyoruz.
+const PULL_IN_CHUNK = 100
 
 // Supabase'de order_items.name kolonu yok — görünen ad, gömülü ürün/varyant
 // ilişkisinden masaüstüyle aynı biçimde ("Ürün (Varyant)") kurulur.
@@ -524,7 +545,9 @@ export async function syncToSupabase(log = null) {
       .upsert(
         { local_id, order_id: Number(order_remote_id), amount, payment_method,
           payer_label: payer_label || null,
-          processed_by: processed_by || null,
+          // Bkz. localDb.isUuid — kuyrukta UUID olmayan bir processed_by
+          // varsa (eski sürümden kalma) sonsuza kadar 22P02 alırdı.
+          processed_by: isUuid(processed_by) ? processed_by : null,
           device: device || 'desktop',
           created_at: created_at || new Date().toISOString(),
           // Veresiye tahsilati: null ise borc hala acik
@@ -917,6 +940,53 @@ export async function pullFromSupabase(log = null) {
       if (inserted || addedItemIds.length > 0) touched++
     }
     if (touched > 0) ok(`[Sync] ↓ ${touched} aktif sipariş eklendi/güncellendi (canlı senkron)`)
+
+    // ── Uzakta kapanmış ama yerelde açık kalan siparişleri uzlaştır ──
+    // filterUnknownRemoteOrders yerelde VAR olan bir siparişi durumuna
+    // BAKMADAN "biliniyor" sayıp atlıyor. Bu yüzden başka bir cihazda (ya
+    // da elle) kapatılan bir sipariş yerelde sonsuza kadar 'active'
+    // kalıyordu — masalar sayfası yerel getAllActiveOrders üzerinden
+    // çalıştığı için masa da kalıcı olarak dolu görünüyordu. Masa 4'ün
+    // 580 saat açık kalmasının yerel ayağı buydu.
+    //
+    // Bu blok yalnızca liveOrders başarıyla çekildiyse çalışır (else if
+    // içindeyiz) — sorgu hata verdiyse hiçbir şeyi kapatmıyoruz, yoksa
+    // geçici bir ağ hatası bütün açık masaları süpürürdü.
+    //
+    // Yerel bekleyen değişiklikler için ayrı bir koruma gerekmiyor:
+    // triggerSync önce syncToSupabase (push), sonra pull çalıştırıyor —
+    // bu noktada yerelde gönderilmemiş iş kalmamış oluyor, dolayısıyla
+    // uzak durum yetkili kabul edilebilir.
+    const stillActive = new Set(liveOrders.map(o => String(o.id)))
+    const localOpen = getAllActiveOrders()
+      .filter(o => o.remote_id && !stillActive.has(String(o.remote_id)))
+
+    if (localOpen.length > 0) {
+      const { data: statusRows, error: statusErr } = await supabase
+        .from('orders')
+        .select('id, status, closed_at, payment_method')
+        .in('id', localOpen.map(o => Number(o.remote_id)))
+
+      if (statusErr) {
+        err('[Sync] ✗ Kapanmış sipariş durumları okunamadı', statusErr)
+      } else {
+        const byRemote = new Map((statusRows ?? []).map(r => [String(r.id), r]))
+        let reconciled = 0
+        for (const lo of localOpen) {
+          const r = byRemote.get(String(lo.remote_id))
+          if (!r || r.status === 'active') continue
+          await closeLocalOrderFromRemote(lo.id, {
+            status: r.status,
+            closedAt: r.closed_at,
+            paymentMethod: r.payment_method,
+          })
+          reconciled++
+        }
+        if (reconciled > 0) {
+          ok(`[Sync] ↓ ${reconciled} sipariş uzakta kapanmıştı — yerelde de kapatıldı`)
+        }
+      }
+    }
   }
 
   // ── Pull completed orders this device never saw ────────────────
@@ -925,18 +995,40 @@ export async function pullFromSupabase(log = null) {
   // eksik kalırdı — ciro, ödeme dağılımı ve personel performansı yanlış olurdu.
   // Önce hafif bir id listesi çekilir, yalnızca yerelde bilinmeyenler
   // tam olarak indirilir; böylece her turda tüm geçmiş yeniden çekilmez.
-  const since = new Date(Date.now() - COMPLETED_PULL_WINDOW_DAYS * 86400_000).toISOString()
-  const { data: doneIdRows, error: doneIdErr } = await supabase
-    .from('orders')
-    .select('id, local_id')
-    .eq('status', 'completed')
-    .gte('closed_at', since)
+  // Geri dolum yapılmadıysa tarih sınırı UYGULANMAZ — geçmişin tamamı gelir.
+  const needsBackfill = getMeta(COMPLETED_BACKFILL_KEY) !== '1'
+  const since = needsBackfill
+    ? null
+    : new Date(Date.now() - COMPLETED_PULL_WINDOW_DAYS * 86400_000).toISOString()
+  if (needsBackfill) ok('[Sync] ↓ İlk kurulum/kurtarma — kapanmış satışların tamamı çekiliyor')
 
-  if (doneIdErr) {
-    err('[Sync] ✗ Kapanan siparişler listelenemedi', doneIdErr)
+  // Sayfa sayfa id listesi. Sıralama olmadan range() tutarsız sonuç verir.
+  const doneIdRows = []
+  let listFailed = false
+  for (let from = 0; ; from += PULL_PAGE_SIZE) {
+    let q = supabase.from('orders').select('id, local_id').eq('status', 'completed')
+    if (since) q = q.gte('closed_at', since)
+    const { data: page, error: pageErr } = await q
+      .order('id', { ascending: true })
+      .range(from, from + PULL_PAGE_SIZE - 1)
+    if (pageErr) {
+      err('[Sync] ✗ Kapanan siparişler listelenemedi', pageErr)
+      listFailed = true
+      break
+    }
+    doneIdRows.push(...(page ?? []))
+    if (!page || page.length < PULL_PAGE_SIZE) break
+  }
+
+  if (listFailed) {
+    // Bayrak yazılmıyor — eksik bir geri dolum "tamamlandı" sayılmamalı.
   } else {
-    const unknownIds = filterUnknownRemoteOrders(doneIdRows ?? [])
-    if (unknownIds.length > 0) {
+    const unknownIds = filterUnknownRemoteOrders(doneIdRows)
+    let added = 0
+    let detailFailed = false
+
+    for (let i = 0; i < unknownIds.length && !detailFailed; i += PULL_IN_CHUNK) {
+      const idChunk = unknownIds.slice(i, i + PULL_IN_CHUNK)
       const { data: doneOrders, error: doneErr } = await supabase
         .from('orders')
         .select(`
@@ -950,14 +1042,16 @@ export async function pullFromSupabase(log = null) {
           ),
           payments ( id, local_id, amount, payment_method, payer_label, processed_by, device, created_at )
         `)
-        .in('id', unknownIds)
+        .in('id', idChunk)
 
       if (doneErr) {
         err('[Sync] ✗ Kapanan siparişler çekilemedi', doneErr)
+        detailFailed = true
       } else {
-        let added = 0
         for (const o of (doneOrders ?? [])) {
           await insertRemoteCompletedOrder({
+            // Parti bitince tek sefer yazılıyor — bkz. aşağıdaki persistDb().
+            persist: false,
             remoteId: o.id,
             localId: o.local_id,
             tableId: o.table_id,
@@ -998,8 +1092,20 @@ export async function pullFromSupabase(log = null) {
           })
           added++
         }
-        if (added > 0) ok(`[Sync] ↓ ${added} kapanan satış çekildi (diğer cihazlardan)`)
+        // Parça başına bir disk yazımı. Sipariş başına yazsaydık 1.400+
+        // siparişlik geri dolumda uygulama dakikalarca donardı.
+        await persistDb()
       }
+    }
+
+    if (added > 0) ok(`[Sync] ↓ ${added} kapanan satış çekildi (diğer cihazlardan)`)
+
+    // Bayrak YALNIZCA liste ve ayrıntı çekimlerinin ikisi de eksiksiz
+    // tamamlandıysa yazılır. Yarım kalmış bir geri dolumu "tamam" işaretlemek,
+    // kurtarılabilecek geçmişi kalıcı olarak kaybettirir.
+    if (needsBackfill && !detailFailed) {
+      await setMeta(COMPLETED_BACKFILL_KEY, '1')
+      ok(`[Sync] ✓ Tam geçmiş geri dolumu tamamlandı (${doneIdRows.length} kapanmış satış tarandı)`)
     }
   }
 

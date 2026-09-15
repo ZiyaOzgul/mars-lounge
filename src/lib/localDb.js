@@ -4,6 +4,7 @@
  *
  * Data ownership:
  *   table_defs                → LOCAL ONLY (never synced to Supabase)
+ *   table_labels              → LOCAL ONLY (masaya verilen geçici ad)
  *   categories                → LOCAL + SUPABASE  (is_synced flag, synced via sync.js when online)
  *   products                  → LOCAL + SUPABASE  (is_synced flag, synced via sync.js when online)
  *   ingredients               → LOCAL + SUPABASE  (is_synced flag)
@@ -32,6 +33,52 @@ function newLocalId() {
 }
 
 export function isDbInitialized() { return db !== null }
+
+// Supabase'de payments.processed_by UUID tipinde. Buraya UUID olmayan bir
+// şey gönderildiğinde Postgres 22P02 ("invalid input syntax for type uuid")
+// ile reddediyor ve ödeme SONSUZA KADAR senkron olamıyor — her turda aynı
+// hatayla tekrar deneniyor. Canlı sistemde garson adı ("USMAN") bu alana
+// yazıldığı için tam olarak bu oldu. Artık gönderilmeden önce kontrol
+// ediliyor: UUID değilse null gider, ödeme kaydı kaybolmaz.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+export function isUuid(v) {
+  return typeof v === 'string' && UUID_RE.test(v.trim())
+}
+
+// Garson adından Supabase kullanıcı kimliğini çözer. Personel tablosunda
+// zaten supabase_uid var; ödeme yolunda kullanılmıyordu. Bulunamazsa null
+// döner — ödemenin kaydedilmesi personelin eşleşmesinden önemli.
+export function getStaffUidByName(name) {
+  requireDb()
+  const clean = String(name ?? '').trim()
+  if (!clean) return null
+  try {
+    const res = db.exec(
+      'SELECT supabase_uid FROM staff WHERE name = ? AND supabase_uid IS NOT NULL LIMIT 1',
+      [clean]
+    )
+    const uid = res.length && res[0].values.length ? res[0].values[0][0] : null
+    return isUuid(uid) ? uid : null
+  } catch {
+    return null // supabase_uid kolonu olmayan eski sürümler
+  }
+}
+
+// ── meta (LOCAL ONLY, key/value) ──────────────────────────────────
+// Tek seferlik göç ve geri dolum bayrakları burada tutuluyor. Şimdiye
+// kadar her çağıran yerde satır içi SQL yazılıyordu; senkron tarafından
+// da kullanılacağı için dışa açık hâle getirildi.
+export function getMeta(key) {
+  requireDb()
+  const res = db.exec('SELECT value FROM meta WHERE key = ?', [String(key)])
+  return res.length && res[0].values.length ? res[0].values[0][0] : null
+}
+
+export async function setMeta(key, value) {
+  requireDb()
+  db.run('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', [String(key), String(value)])
+  await persistDb()
+}
 
 // Set when initDb() had to recover from a corrupt/unreadable db file (from
 // the rolling .bak backup, or — only as a last resort — a fresh empty db).
@@ -78,6 +125,17 @@ const SCHEMA = `
   CREATE TABLE IF NOT EXISTS table_defs (
     id   INTEGER PRIMARY KEY,
     name TEXT    NOT NULL
+  );
+
+  -- Masaya verilen gecici görünen ad ("Ziya", "Pencere kenarı"). Masa
+  -- numarasının YERİNE geçmez, yanında görünür — kasiyer numarayı
+  -- bilmeden masayı bulabilsin diye. Masa kapanınca silinir.
+  -- table_defs gibi SADECE YEREL: tek bir kasada anlamlı, görsel bir
+  -- kolaylık; Supabase'e gitmez, QR menüyü ve raporları etkilemez.
+  CREATE TABLE IF NOT EXISTS table_labels (
+    table_id   INTEGER PRIMARY KEY,
+    label      TEXT    NOT NULL,
+    created_at TEXT    NOT NULL
   );
 
   CREATE TABLE IF NOT EXISTS categories (
@@ -249,6 +307,73 @@ const SCHEMA = `
 `
 
 // ── Init ──────────────────────────────────────────────────────────
+
+// new SQL.Database(bytes) bozuk bir dosyayı HİÇ ŞİKÂYET ETMEDEN açar —
+// doğrulama yapmaz. Bozulma ancak ilk gerçek sorguda patlar. Eskiden
+// SCHEMA kurtarma try/catch'inin DIŞINDA çalıştığı için, en yaygın
+// bozulma şekli (yarım yazılmış dosya / bozuk sayfa) .bak kurtarmasını
+// hiç tetiklemiyordu: hata kurtarma bloğuna hiç uğramadan dışarı
+// kaçıyordu. Açma + şema + bütünlük kontrolünü tek yerde toplayıp
+// hepsini kurtarma try/catch'inin İÇİNE alıyoruz.
+function openAndVerify(SQL, bytes) {
+  const candidate = bytes ? new SQL.Database(bytes) : new SQL.Database()
+  try {
+    candidate.run(SCHEMA)
+    // Sayfa bütünlüğü: bozuk bir dosya burada "database disk image is
+    // malformed" atar ve çağıran taraf yedeğe geçebilir.
+    candidate.exec('PRAGMA quick_check(1)')
+  } catch (e) {
+    try { candidate.close() } catch { /* zaten kullanılamaz durumda */ }
+    throw e
+  }
+  return candidate
+}
+
+// Son çare: dosyayı DOĞRULAMADAN açar, yalnızca şemanın kurulabildiğini
+// kontrol eder. quick_check'i geçemeyen ama büyük kısmı hâlâ okunabilen bir
+// dosyayı kurtarmak için — boş bir veritabanına düşmekten her zaman iyidir.
+// Başarısız olursa null döner.
+function openBestEffort(SQL, bytes) {
+  try {
+    const candidate = new SQL.Database(bytes)
+    candidate.run(SCHEMA) // en azından yazılabilir olmalı
+    return candidate
+  } catch (e) {
+    console.error('[localDb] Son çare açılış da başarısız:', e)
+    return null
+  }
+}
+
+// sql.js bir WASM tuzağına düştüğünde ("memory access out of bounds",
+// "unreachable" vb.) instance KALICI olarak ölür: sonraki her sorgu aynı
+// hatayı verir. Uygulamanın donup yeniden başlatılmadan düzelmemesinin
+// sebebi tam olarak budur — React'i yeniden render etmek işe yaramaz,
+// çünkü bozulan JS değil WASM heap'idir.
+export function isWasmTrap(err) {
+  // Asıl ölçüt bu: V8 gerçek bir WASM tuzağında daima
+  // WebAssembly.RuntimeError atar.
+  if (typeof WebAssembly !== 'undefined' && err instanceof WebAssembly.RuntimeError) return true
+
+  const msg   = String(err?.message ?? err ?? '')
+  const stack = String(err?.stack ?? '')
+
+  // Metin eşleştirme yalnızca hata tipini kaybetmiş (serileşmiş, IPC'den
+  // geçmiş) durumlar için bir emniyet ağı. Bu yüzden SADECE başka bağlamda
+  // ortaya çıkmayacak, WASM'e özgü ifadeler.
+  if (/memory access out of bounds|unreachable executed|table index is out of bounds|null function or function signature mismatch|indirect call to null/i.test(msg)) {
+    return true
+  }
+
+  // "unreachable" tek başına TEHLİKELİ: ağ hataları da bu kelimeyi taşıyor
+  // ("Network is unreachable", "net::ERR_ADDRESS_UNREACHABLE",
+  // "host unreachable"). Bir dönem bu kelime düz eşleştiriliyordu; global
+  // unhandledrejection dinleyicisiyle birleşince internet kesildiğinde
+  // uygulama kendini 10 saniyede bir yeniden yükler hâle geliyordu — yani
+  // tam olarak çevrimdışı senaryoda. Artık ancak yığın izi gerçekten
+  // wasm'ı gösteriyorsa tuzak sayıyoruz.
+  return /\bunreachable\b/i.test(msg) && /wasm-function\[|\.wasm/i.test(stack)
+}
+
 export async function initDb() {
   if (db) return db
 
@@ -265,10 +390,10 @@ export async function initDb() {
   }
   if (!loaded) {
     // First run — no file on disk yet. Clean empty db, no warning.
-    db = new SQL.Database()
+    db = openAndVerify(SQL, null)
   } else {
     try {
-      db = new SQL.Database(new Uint8Array(loaded))
+      db = openAndVerify(SQL, new Uint8Array(loaded))
     } catch (e) {
       // The live file exists but failed to parse (truncated write, disk
       // corruption, …). NEVER silently reseed an empty db here — that would
@@ -285,7 +410,7 @@ export async function initDb() {
 
       if (backupLoaded) {
         try {
-          db = new SQL.Database(new Uint8Array(backupLoaded))
+          db = openAndVerify(SQL, new Uint8Array(backupLoaded))
           dbInitWarning =
             'Ana veritabanı dosyası bozuk olduğu için bir önceki yedekten geri yüklendi. ' +
             'Kapanmadan hemen önce yapılan birkaç işlem kaybolmuş olabilir — lütfen açık ' +
@@ -293,14 +418,28 @@ export async function initDb() {
           console.error('[localDb] KRİTİK: yedekten kurtarma yapıldı —', dbInitWarning)
         } catch (be) {
           console.error('[localDb] Yedek dosyası da bozuk — okunamadı:', be)
-          db = new SQL.Database()
-          dbInitWarning =
-            'Yerel veritabanı dosyası VE yedeği bozuk olduğu için okunamadı. Boş bir ' +
-            'veritabanıyla devam ediliyor — önceki veriler kurtarılamadı. Lütfen destek ' +
-            'ekibiyle iletişime geçin.'
+          // Son çare sırası ÖNEMLİ: boş bir veritabanı, kısmen bozuk bir
+          // veritabanından daha kötüdür. quick_check bir sayfada hata
+          // bulduğunda dosyanın geri kalanı hâlâ okunabilir olabiliyor;
+          // boşa düşmek kasiyere "tüm veri gitti" gibi görünür. Bu yüzden
+          // önce ana dosyayı DOĞRULAMADAN açmayı deniyoruz.
+          db = openBestEffort(SQL, new Uint8Array(loaded))
+          dbInitWarning = db
+            ? 'Yerel veritabanı dosyasında bozulma var ve yedeği de okunamadı. ' +
+              'Uygulama mevcut dosyayla devam ediyor — bazı kayıtlar eksik ya da ' +
+              'hatalı olabilir. LÜTFEN HEMEN DESTEK EKİBİYLE İLETİŞİME GEÇİN ve ' +
+              'bu arada Ayarlar → Sistem üzerinden bir yedek alın.'
+            : null
+          if (!db) {
+            db = openAndVerify(SQL, null)
+            dbInitWarning =
+              'Yerel veritabanı dosyası VE yedeği hiç açılamadı. Boş bir ' +
+              'veritabanıyla devam ediliyor — satış geçmişi sunucudan geri ' +
+              'çekilecek. Lütfen destek ekibiyle iletişime geçin.'
+          }
         }
       } else {
-        db = new SQL.Database()
+        db = openAndVerify(SQL, null)
         dbInitWarning =
           'Yerel veritabanı dosyası bozuk olduğu için okunamadı ve bir yedek bulunamadı. ' +
           'Boş bir veritabanıyla devam ediliyor — önceki veriler kurtarılamadı. Lütfen ' +
@@ -309,7 +448,7 @@ export async function initDb() {
     }
   }
 
-  db.run(SCHEMA)
+  // ŞEMA openAndVerify içinde kuruldu — burada tekrarlanmıyor.
 
   // Migrations — idempotent, no-op if column already exists
   const migrations = [
@@ -418,6 +557,42 @@ export async function initDb() {
   ]
   for (const sql of migrations) {
     try { db.run(sql) } catch { /* column already exists — ignore */ }
+  }
+
+  // ── Tek seferlik: kuyrukta takılı kalmış processed_by değerleri ──
+  // Supabase payments.processed_by UUID bekliyor. Garson adı yazılmış
+  // satırlar her senkron turunda 22P02 alıp sonsuza kadar kuyrukta
+  // kalıyordu. Adı çözebiliyorsak personelin supabase_uid'sine
+  // çeviriyoruz, çözemiyorsak NULL yapıyoruz — ödemenin sunucuya
+  // ulaşması, hangi personelin aldığı bilgisinden önemli.
+  try {
+    if (db.exec("SELECT value FROM meta WHERE key = 'payments-processed-by-uuid-v1'").length === 0) {
+      const bad = db.exec(
+        "SELECT id, processed_by FROM payments WHERE processed_by IS NOT NULL AND processed_by != ''"
+      )
+      let fixed = 0, nulled = 0
+      if (bad.length) {
+        for (const [pid, value] of bad[0].values) {
+          if (isUuid(value)) continue
+          const uid = getStaffUidByName(value)
+          if (uid) {
+            db.run('UPDATE payments SET processed_by = ? WHERE id = ?', [uid, pid])
+            fixed++
+          } else {
+            db.run('UPDATE payments SET processed_by = NULL WHERE id = ?', [pid])
+            nulled++
+          }
+        }
+      }
+      db.run("INSERT OR REPLACE INTO meta (key, value) VALUES ('payments-processed-by-uuid-v1', ?)",
+        [new Date().toISOString()])
+      if (fixed || nulled) {
+        console.warn(`[localDb] processed_by düzeltmesi: ${fixed} kayıt personel kimliğine çevrildi, ${nulled} kayıt boşaltıldı`)
+      }
+      await persistDb()
+    }
+  } catch (e) {
+    console.warn('[localDb] processed_by düzeltmesi atlandı', e)
   }
 
   // Seed on first run (empty tables)
@@ -551,6 +726,38 @@ export async function insertTableDef(name) {
   db.run('INSERT INTO table_defs (id, name) VALUES (?, ?)', [id, name])
   await persistDb()
   return { id, name }
+}
+
+// ── table_labels (LOCAL ONLY) ─────────────────────────────────────
+// Masaya verilen geçici ad. { [tableId]: label } döner ki çağıran taraf
+// masa başına arama yapmasın — masalar sayfası her saniye yeniden
+// render oluyor (canlı saat), oradaki her kart için ayrı sorgu atmak
+// gereksiz maliyet olurdu.
+export function getAllTableLabels() {
+  requireDb()
+  const res = db.exec('SELECT table_id, label FROM table_labels')
+  if (!res.length) return {}
+  return Object.fromEntries(res[0].values.map(([id, label]) => [String(id), label]))
+}
+
+// Boş/whitespace bir ad etiketi siler — kullanıcı alanı temizleyerek
+// masayı numarasına döndürebilsin.
+export async function setTableLabel(tableId, label) {
+  requireDb()
+  const clean = String(label ?? '').trim().slice(0, 24)
+  if (!clean) return clearTableLabel(tableId)
+  db.run(
+    `INSERT INTO table_labels (table_id, label, created_at) VALUES (?, ?, ?)
+     ON CONFLICT(table_id) DO UPDATE SET label = excluded.label`,
+    [Number(tableId), clean, new Date().toISOString()]
+  )
+  await persistDb()
+}
+
+export async function clearTableLabel(tableId) {
+  requireDb()
+  db.run('DELETE FROM table_labels WHERE table_id = ?', [Number(tableId)])
+  await persistDb()
 }
 
 export async function updateTableDef(id, name) {
@@ -2621,7 +2828,13 @@ export function getOrderItemRemoteIds(itemIds) {
 // → order_items.remote_id), and rows dropped from the runtime group are
 // deleted unless already paid. QR groups map onto their existing Supabase
 // order via remote_id instead of creating a second remote order.
-export async function ensurePersistedActiveOrder({ tableId, tableName, waiterName = null, groupLocalId, supabaseOrderId = null, items = [], total = 0 }) {
+// discount/subtotal: `total` NET tutardır (indirim düşülmüş) — bütün
+// tamamlanmış-sipariş yazma yolları bu düzeni kullanıyor. Eskiden aktif
+// siparişte yalnızca net `total` yazılıyor, indirimin kendisi hiçbir yere
+// kaydedilmiyordu; sipariş kapanana kadar `discount = 0` kalıyordu. Masa 4
+// gibi hiç kapanmayan bir sipariş bu yüzden "indirimi olmayan ama eksik
+// ödenmiş" görünüyordu ve ne olduğu veriden anlaşılamıyordu.
+export async function ensurePersistedActiveOrder({ tableId, tableName, waiterName = null, groupLocalId, supabaseOrderId = null, items = [], total = 0, discount = 0 }) {
   requireDb()
   let orderId = null
   let remoteId = supabaseOrderId != null ? String(supabaseOrderId) : null
@@ -2635,21 +2848,26 @@ export async function ensurePersistedActiveOrder({ tableId, tableName, waiterNam
     remoteId = res[0].values[0][1] != null ? String(res[0].values[0][1]) : remoteId
     // Only flag unsynced when something actually changed — this runs on a
     // debounce for every open table and must not spam the push queue
+    const net  = Number(total) || 0
+    const disc = Number(discount) || 0
     db.run(
-      `UPDATE orders SET total = ?, table_id = ?, table_name = ?,
-              is_synced = CASE WHEN total = ? AND table_id = ? AND table_name = ? THEN is_synced ELSE 0 END
+      `UPDATE orders SET total = ?, discount = ?, subtotal = ?, table_id = ?, table_name = ?,
+              is_synced = CASE WHEN total = ? AND discount = ? AND table_id = ? AND table_name = ? THEN is_synced ELSE 0 END
        WHERE id = ?`,
-      [Number(total) || 0, tableId, tableName || '',
-       Number(total) || 0, tableId, tableName || '', orderId])
+      [net, disc, Math.round((net + disc) * 100) / 100, tableId, tableName || '',
+       net, disc, tableId, tableName || '', orderId])
   } else {
     orderId = newLocalId()
+    const net  = Number(total) || 0
+    const disc = Number(discount) || 0
     db.run(
       `INSERT INTO orders
-         (id, local_id, table_id, table_name, status, payment_method, total,
+         (id, local_id, table_id, table_name, status, payment_method, subtotal, discount, total,
           is_synced, remote_id, created_at, closed_at, waiter_name)
-       VALUES (?, ?, ?, ?, 'active', '', ?, ?, ?, ?, '', ?)`,
+       VALUES (?, ?, ?, ?, 'active', '', ?, ?, ?, ?, ?, ?, '', ?)`,
       [orderId, String(groupLocalId), tableId, tableName || '',
-       Number(total) || 0, remoteId ? 1 : 0, remoteId, new Date().toISOString(), waiterName || null]
+       Math.round((net + disc) * 100) / 100, disc, net,
+       remoteId ? 1 : 0, remoteId, new Date().toISOString(), waiterName || null]
     )
   }
 
@@ -2929,9 +3147,13 @@ export function filterUnknownRemoteOrders(rows) {
 // görmediği bir satış. Raporların (ciro, ödeme dağılımı, personel
 // performansı) eksik kalmaması için tamamlanmış olarak, ödemeleriyle
 // birlikte ve pre-synced (is_synced = 1) yazılır.
+// persist=false: toplu geri dolumda kullanılır. persistDb() TÜM veritabanını
+// diske yazıyor (sql.js'te kısmi yazma yok); 1.400+ siparişlik bir geri
+// dolumda satır başına bir yazma, uygulamayı dakikalarca dondurur. Çağıran
+// taraf partiyi bitirince persistDb()'yi bir kez kendisi çağırır.
 export async function insertRemoteCompletedOrder({
   remoteId, localId, tableId, waiterName, total, discount = 0,
-  paymentMethod = null, createdAt, closedAt, items, payments,
+  paymentMethod = null, createdAt, closedAt, items, payments, persist = true,
 }) {
   requireDb()
   const localOrderId = newLocalId()
@@ -2983,13 +3205,17 @@ export async function insertRemoteCompletedOrder({
     )
   }
 
-  await persistDb()
+  if (persist) await persistDb()
   return localOrderId
 }
 
 // Close a materialized order with full financials so the reports
 // (payment breakdown, KPIs) see the same columns saveCompletedOrder writes.
-export async function completeActiveOrder(orderId, { subtotal, tax, discount, closedAt = null }) {
+// total: normalde dokunulmaz (ensurePersistedActiveOrder zaten net tutarı
+// yazmıştır). Yalnızca "kalanla kapat" yolunda veriliyor — orada sipariş
+// tutarının gerçekten alınan paraya çekilmesi gerekiyor, yoksa ciro hiç
+// girmemiş bir parayı girmiş gibi gösterir.
+export async function completeActiveOrder(orderId, { subtotal, tax, discount, total = null, closedAt = null }) {
   requireDb()
   const payments = getOrderPayments(orderId)
   const sumMethod = (pred) => payments.filter(pred).reduce((s, p) => s + Number(p.amount), 0)
@@ -3003,10 +3229,12 @@ export async function completeActiveOrder(orderId, { subtotal, tax, discount, cl
   const method = used.length > 1 ? 'split' : (used[0]?.[0] ?? 'card')
   db.run(
     `UPDATE orders SET status = 'completed', payment_method = ?, subtotal = ?, tax = ?, discount = ?,
+            total = COALESCE(?, total),
             cash_amount = ?, card_amount = ?, iban_amount = ?, veresiye_amount = ?,
             closed_at = ?, is_synced = 0
      WHERE id = ?`,
     [method, Number(subtotal) || 0, Number(tax) || 0, Number(discount) || 0,
+     total == null ? null : Number(total),
      cash > 0 ? cash : null, card > 0 ? card : null, iban > 0 ? iban : null,
      veresiye > 0 ? veresiye : null,
      closedAt || new Date().toISOString(), orderId]
@@ -3083,6 +3311,25 @@ export async function deleteOrderItemRow(itemId) {
 export async function updateOrderTotal(orderId, total) {
   requireDb()
   db.run('UPDATE orders SET total = ?, is_synced = 0 WHERE id = ?', [Number(total), orderId])
+  await persistDb()
+}
+
+// Uzakta kapanmış bir siparişi yerelde de kapatır. setOrderStatus'tan
+// farkı is_synced: burada uzak taraf ZATEN doğru durumu biliyor, bu yüzden
+// kaydı senkronlu (1) işaretliyoruz. setOrderStatus kullansaydık is_synced=0
+// olur ve bir sonraki tur aynı durumu gereksiz yere Supabase'e geri
+// gönderirdi.
+export async function closeLocalOrderFromRemote(orderId, { status, closedAt, paymentMethod }) {
+  requireDb()
+  db.run(
+    `UPDATE orders
+       SET status = ?,
+           closed_at = COALESCE(NULLIF(?, ''), closed_at, ?),
+           payment_method = COALESCE(?, payment_method),
+           is_synced = 1
+     WHERE id = ?`,
+    [status, closedAt ?? '', new Date().toISOString(), paymentMethod ?? null, orderId]
+  )
   await persistDb()
 }
 

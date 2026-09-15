@@ -8,6 +8,7 @@
  */
 
 import { supabase, isSupabaseReady } from './supabase.js'
+import { isFullyPaid } from './money.js'
 import {
   insertPayment,
   insertPaymentItems,
@@ -17,6 +18,7 @@ import {
   getOrderTotalPaid,
   getOrderItemRemoteIds,
   persistDb,
+  isUuid,
 } from './localDb.js'
 
 function uuid() {
@@ -64,7 +66,10 @@ export async function addPayments({
   // 2) Compute paid/remaining off the local store
   const paid = getOrderTotalPaid(orderLocalId)
   const remaining = Math.max(Number(total) - paid, 0)
-  const completed = paid + 0.001 >= Number(total)
+  // Yuvarlama payı için bkz. money.js — eskiden buradaki eşik 0,001 TL
+  // idi ve hesabı bölerken oluşan birkaç kuruşluk artık bile siparişi
+  // sonsuza kadar açık bırakıyordu (Masa 4 vakası).
+  const completed = isFullyPaid(paid, total)
 
   // 3) If online and remote order exists, push payments immediately so mobile sees them live.
   if (isSupabaseReady && orderRemoteId) {
@@ -79,7 +84,9 @@ export async function addPayments({
               amount: Number(row.amount),
               payment_method: row.payment_method,
               payer_label: row.payer_label || null,
-              processed_by: processedBy || null,
+              // UUID değilse null: Supabase bu kolonu uuid olarak tanımlı
+              // tutuyor ve garson adı gibi bir değer tüm ödemeyi reddettirir.
+              processed_by: isUuid(processedBy) ? processedBy : null,
               device: 'desktop',
             },
             { onConflict: 'local_id' }

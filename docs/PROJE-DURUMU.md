@@ -121,11 +121,144 @@ kaydedince geri yazılıyor.
 14. Login hatası yanıltıcı: Supabase yapılandırılmamışken "ilk giriş için internet
     gerekli" diyor (`Login.jsx:72` → `:45`). `.env` yokken geliştiriciyi yanıltır.
 
+## Mimari: yerel çalışma alanı, Supabase kayıt defteri (14 Eylül 2026)
+
+Uygulama **local-first** kalıyor ve bu bilinçli bir tercih: kasa, internet
+takıldı diye satışı durduramaz ve sql.js anlık, Supabase her yazmada
+gidip gelen bir tur demek. Sunucu-öncelikliye geçmek çevrimdışı gereksinimini
+ortadan kaldırmadığı için karmaşıklığı azaltmaz, sadece yön değiştirir —
+üstüne 4.400 satırlık veri katmanının canlı sistemde yeniden yazılması gelir.
+
+Değişen şey konvansiyon: eskiden "yerel kaynak, Supabase kopya" idi. Artık:
+
+- **Yazma önce yerele gider** (hız + çevrimdışı).
+- **Çelişkide uzak taraf kazanır.** Sipariş durumu/kapanışı için Supabase
+  yetkili; `sync.js` içindeki uzlaştırma adımı yerelde açık kalmış ama uzakta
+  kapanmış siparişleri kapatıyor.
+- **Yerel dosya yeniden kurulabilir olmalı**, yeri doldurulamaz değil.
+
+### Neden 30 günlük pencere kaldırıldı
+
+`COMPLETED_PULL_WINDOW_DAYS = 30` yüzünden yerel dosya bozulup sıfırdan
+kurulduğunda 30 günden eski geçmiş **bir daha geri gelmiyordu**. Bugün bu 5
+günlük kayıp (ilk sipariş 10 Ağustos); altı ay sonra aynı kaza beş aylık
+geçmişi siler. Artık `meta` tablosundaki `completed-backfill-v1` bayrağı
+yoksa geçmişin tamamı bir kez çekiliyor; sonraki turlar 30 günlük pencereyle
+devam ediyor. Bayrak yalnızca çekim eksiksiz tamamlanırsa yazılıyor.
+
+### Bu sırada bulunan canlı hata: PostgREST 1000 satır sınırı
+
+Kapanmış siparişlerin id listesi tek istekte çekiliyordu. Canlı projede
+ölçüldü:
+
+```
+GET /rest/v1/orders?select=id&status=eq.completed
+→ HTTP 206 · Content-Range: 0-999/1443
+```
+
+1.443 siparişin **1.000'i** dönüyordu; kalan 443'ü liste hiç görmüyordu.
+Kendi kasasında oluşan siparişler zaten yerelde olduğu için etkisi sınırlı
+kaldı, ama başka cihazdan (QR/mobil) kapanan bir satış bu eşiğin ötesine
+düşerse raporlara hiç girmiyordu. Artık `.range()` ile sayfalanıyor.
+
+Ayrıca `.in('id', …)` filtresi binlerce id'yi sorgu dizesine koyup isteği
+uzunluk sınırında düşürebiliyordu — 100'lük parçalara bölündü. Ve
+`insertRemoteCompletedOrder` artık `persist: false` kabul ediyor: geri
+dolumda sipariş başına tam veritabanı yazımı uygulamayı dakikalarca
+dondururdu, şimdi parça başına bir kez yazılıyor.
+
+### Yedekleme (14 Eylül 2026)
+
+`.bak` tek kuşak tutuyor ve her yazmada üzerine yazılıyor — bozulma iki kez
+diske inerse sağlam kopya kalmıyor. Buna ek olarak tarihli anlık görüntüler
+alınıyor: `%APPDATA%Mars Lounge Cafeackupssan-lucas-YYYY-MM-DD_HHmm.db`
+
+- **Ne zaman:** açılıştan 90 sn sonra, 6 saatte bir kontrol (en fazla 12
+  saatte bir dosya), ve gece bakımında reload'dan ÖNCE (zorla).
+  Periyodik olan asıl iş yapan tetikleyici — bu PC hiç yeniden başlatılmıyor.
+- **Saklama:** 14 gün, ama en yeni 3 tanesi yaşına bakılmadan korunur.
+  Uzun kapalı kalma sonrası "hepsi eski" diye her şeyin silinmesini engeller.
+- **Bozuk dosya yedeklenmez:** SQLite başlık imzası + boyut kontrolü. Bozuk
+  bir dosyayı yedeklemek sağlam kuşakları emekliye ayırdığı için hiç yedek
+  almamaktan kötüdür.
+- **Atomik:** `.tmp` + rename, yani yarım yazılmış dosya asla `.db` olarak
+  listeye girmez.
+- **Arayüz:** Ayarlar → Sistem → Veritabanı Yedekleri. Elle yedek, klasörü
+  açma ve log dosyasını gösterme buradan.
+
+**Kapsam sınırı:** Bu yedekler yerel diskte. Dosya bozulmasına karşı korur,
+PC'nin komple gitmesine karşı DEĞİL. Satış verisi (siparişler, kalemler,
+ödemeler) zaten Supabase'de ve artık tam geri dolumla geri gelebiliyor;
+yerel yedeğin asıl değeri sadece yerelde yaşayan şeyler (masa tanımları,
+masa adları, çevrimdışı kimlik bilgileri, meta bayrakları) ve sunucuya
+henüz gitmemiş kayıtlar.
+
+### 22P02: ödeme senkronunu kilitleyen UUID hatası (15 Eylül 2026)
+
+Belirti: `[Sync] ✗ Ödeme yüklenemedi — code=22P02 | msg=invalid input syntax
+for type uuid: "USMAN"`
+
+Kök neden: Supabase'de `payments.processed_by` **uuid** tipinde, ama
+`Tables.jsx` oraya garson ADINI gönderiyordu. Postgres satırı reddediyor,
+ödeme `is_synced = 0` kalıyor ve HER senkron turunda aynı hatayla yeniden
+deneniyor — yani sonsuza kadar kuyrukta.
+
+Neden geç fark edildi: garson seçilmeyen ödemelerde alan `null` gidiyor ve
+sorun çıkmıyor. Müşterinin veritabanında 1.533 ödemenin `processed_by`'ı
+null, yalnızca 2 tanesi "USMAN" — ve o ikisi de senkronlanmamıştı.
+
+Üç katmanlı düzeltme:
+1. `localDb.isUuid()` — tek doğru kaynak.
+2. `orderOperations.addPayments` ve `sync.js` push'u: UUID olmayan değer
+   `null` olarak gider. Ödemenin sunucuya ulaşması, personel eşleşmesinden
+   önemli.
+3. `Tables.jsx` artık `getStaffUidByName()` ile gerçek `staff.supabase_uid`
+   değerini gönderiyor. Ad zaten `orders.waiter_name`'de duruyordu.
+
+Ayrıca tek seferlik göç (`payments-processed-by-uuid-v1`): kuyrukta kalmış
+satırlar personel kimliğine çevriliyor, çözülemezse boşaltılıyor. Müşterinin
+gerçek veritabanı kopyasında test edildi — 2 kayıt da null'lanmadan doğru
+uid'ye çevrildi.
+
+**Not:** `staff` tablosunda `supabase_uid` kolonu zaten vardı, ödeme yolunda
+hiç kullanılmıyordu.
+
+### ⚠️ Yayınlanan sürüm kurulmuyor olabilir (16 Eylül 2026)
+
+**v1.3.2 12 Eylül'de yayınlandı ama müşteri 15 Eylül'de hâlâ v1.3.1
+kullanıyordu.** Kanıt: müşterinin userData klasöründe `logs/` hiç
+oluşmamıştı — dosya loglaması (`logLine`) v1.3.2 ile gelmişti ve 15
+dakikada bir yazıyor.
+
+Sebep: `autoUpdater.autoInstallOnAppQuit = true` — güncelleme YALNIZCA
+uygulama kapanırken kuruluyor. Bu kasa hiç kapatılmıyor, uygulama günlerce
+açık kalıyor. "Şimdi Yeniden Başlat / Daha Sonra" penceresi servis sırasında
+çıkınca doğal olarak "Daha Sonra" seçiliyor. Sonuç: sürüm süresiz olarak
+kurulmadan bekliyor.
+
+**Bunun bedeli somut:** v1.3.1'de `webContents.getProcessMemoryInfo()`
+çağrılıyordu — bu API Electron 29'da yok, senkron TypeError fırlatıyor ve
+`setInterval` içinden fırladığı için Electron'un "A JavaScript error
+occurred in the main process" penceresi **15 dakikada bir** kasiyerin
+karşısına çıkıyordu. `4e5a0eb` bunu düzeltmişti — ama düzeltme hiç
+kurulmadığı için müşteri haftalarca bu hatayı yaşamaya devam etti.
+
+Düzeltme: gece bakım penceresinde, kasiyer onay verdiğinde, bekleyen bir
+güncelleme varsa `win.reload()` yerine `autoUpdater.quitAndInstall(true, true)`
+çalışıyor. Sessiz kurulum + otomatik yeniden başlatma; kasiyerin bir şey
+yapması gerekmiyor.
+
+**Kural: bir sürümü yayınlamak, müşteriye ulaştığı anlamına GELMEZ.**
+Doğrulamanın tek yolu kurulu sürümü teyit etmek (Ayarlar'daki sürüm bilgisi
+ya da userData'da beklenen dosyaların varlığı).
+
 ## Canlı veri durumu (13 Eylül 2026)
 
-- **Masa 4** — 20 Ağustos'tan kalma 6 aktif sipariş: 545 TL fatura, **516,31 TL tahsil
-  edilmiş**. Bunlar boş hayalet değil, parası alınmış ama kapatılmamış siparişler.
-  **İptal edilmemeli.** Muhtemelen `completed` olmalı, ama bu ciroyu 545 TL artırır.
+- **Masa 4** — ✅ **ÇÖZÜLDÜ (14 Eylül 2026).** 20 Ağustos'tan kalma 6 + 12 Eylül'den
+  1 sipariş (toplam 7) `completed` yapıldı; `closed_at` paranın alındığı ana yazıldı.
+  Ayrıntı, kök neden ve rollback SQL: `docs/masa4-duzeltme-2026-09-14.md`.
+  Kök neden `orderOperations.js:67` — tolerans 0,001 TL, ödeme toplamın bir kuruş
+  altında kalırsa sipariş hiç kapanmıyor. **Bu hâlâ açık**, bkz. aşağıdaki liste.
 - **Masa 1 / 3 / 4** — 11-12 Eylül gecesinden kalan 8 sipariş, ödeme yok (1.850 TL).
   Gerçekten unutulmuş mu yoksa hâlâ açık mı, kafedeki kişiye sorulacaktı; cevap gelmedi.
 - **Tahsil edilmiş veresiye** — 5 kayıt / 1.580 TL (sipariş 1263, 1307, 1392, 1393, 1394).
@@ -138,7 +271,18 @@ kaydedince geri yazılıyor.
 
 - [ ] **Veritabanı yedeği alınmadı.** En kritik açık madde.
 - [ ] Masa 1/3/4'teki gece kalıntıları iptal edilsin mi?
-- [ ] Masa 4'ün Ağustos siparişleri `completed` mi `cancelled` mı? (ciroyu 545 TL etkiler)
+- [x] ~~Masa 4'ün Ağustos siparişleri `completed` mi `cancelled` mı?~~ → `completed`
+      yapıldı (14 Eylül 2026), `docs/masa4-duzeltme-2026-09-14.md`
+- [x] ~~**Ödeme toleransı 0,001 TL**~~ → `src/lib/money.js` ile 5 kuruşa çıkarıldı ve
+      tek kaynağa taşındı (14 Eylül 2026). Aynı sabit `PaymentModal.jsx` ve
+      `orderOperations.js` tarafından paylaşılıyor; eskiden ikisinde ayrı ayrı
+      `+ 0.001` yazıyordu ve senkron kalmaları hiçbir şeyle garanti değildi.
+- [x] ~~**Ödeme anındaki indirim `orders.discount`'a yazılmıyor**~~ →
+      `ensurePersistedActiveOrder` artık `subtotal` ve `discount` alanlarını da yazıyor
+      (14 Eylül 2026). Sipariş kapanmasa bile indirim veride görünüyor.
+- [x] ~~Yuvarlama payını aşan gerçek kalan masayı kilitliyor~~ → PaymentModal'a
+      "kalanı sil, masayı kapat" onayı eklendi. Fark indirim olarak yazılıyor ve
+      sipariş tutarı gerçekten alınan paraya çekiliyor, böylece ciro şişmiyor.
 - [ ] Düzenli otomatik yedekleme isteniyor mu?
 
 ## Bu projede öğrenilen çalışma kuralları
