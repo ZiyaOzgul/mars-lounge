@@ -175,3 +175,18 @@
 .qr-btn--approve:hover {
   background-color: #16a34a;
 }
+
+/* Ekstra secenekler (modifier). Urun adinin altinda, soluk ve girintili —
+   kasiyerin "Cilekli magnolia"daki cilegi gormesi icin. */
+.qr-item__mods {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-top: 2px;
+}
+
+.qr-item__mod {
+  font-size: 11px;
+  color: var(--color-accent);
+  font-weight: 600;
+}

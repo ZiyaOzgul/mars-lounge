@@ -1,8 +1,20 @@
 import './QRApprovalModal.css'
 
+// Bir kalemin ekstralarinin (modifier) birim basina fiyat etkisi.
+// "Çilekli magnolia" gibi siparislerde cilek ayri bir modifier satiri olarak
+// geliyor; hem adi hem fiyati gosterilmeli.
+function modifiersSum(mods) {
+  return (mods ?? []).reduce(
+    (s, m) => s + (Number(m.priceDelta) || 0) * (Number(m.quantity) || 1),
+    0
+  )
+}
+
 function QRApprovalModal({ table, onApprove, onReject }) {
   const items = table.orderItems || []
-  const total = items.reduce((s, i) => s + i.qty * i.unitPrice, 0)
+  // Ekstralar toplama dahil — yoksa "Tahmini Toplam" musterinin odeyecegi
+  // tutardan dusuk cikiyordu.
+  const total = items.reduce((s, i) => s + i.qty * (i.unitPrice + modifiersSum(i.modifiers)), 0)
 
   return (
     <div className="qr-overlay">
@@ -31,9 +43,24 @@ function QRApprovalModal({ table, onApprove, onReject }) {
                 <span className="qr-item__qty">{item.qty}×</span>
                 <div className="qr-item__name-wrap">
                   <span className="qr-item__name">{item.name}</span>
+                  {/* Ekstralar. Eskiden hic gosterilmiyordu: kasiyer
+                      "Çilekli magnolia" siparisinde yalnizca "Magnolia"
+                      goruyor, cilegi bilmeden onayliyordu. */}
+                  {(item.modifiers ?? []).length > 0 && (
+                    <span className="qr-item__mods">
+                      {item.modifiers.map(m => (
+                        <span key={m.id} className="qr-item__mod">
+                          + {m.quantity > 1 ? `${m.quantity}× ` : ''}{m.name}
+                          {Number(m.priceDelta) ? ` (₺${Number(m.priceDelta).toFixed(2)})` : ''}
+                        </span>
+                      ))}
+                    </span>
+                  )}
                   {item.note && <span className="qr-item__note">{item.note}</span>}
                 </div>
-                <span className="qr-item__total">₺{(item.qty * item.unitPrice).toFixed(2)}</span>
+                <span className="qr-item__total">
+                  ₺{(item.qty * (item.unitPrice + modifiersSum(item.modifiers))).toFixed(2)}
+                </span>
               </div>
             ))
           ) : (

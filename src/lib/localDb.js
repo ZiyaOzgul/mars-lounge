@@ -1426,11 +1426,19 @@ export async function saveCompletedOrder(txData) {
 
 export function getDailyRevenue() {
   requireDb()
+  // Veresiye satış anında sayılmaz, tahsil edildiği gün sayılır — bkz.
+  // _revenueRows. Bugünün cirosu da aynı kurala uymalı, yoksa masalar
+  // sayfasındaki tutar raporlarla çelişir.
   const res = db.exec(
-    `SELECT COALESCE(SUM(total), 0)
-     FROM orders
-     WHERE status = 'completed'
-       AND date(closed_at, 'localtime') = date('now', 'localtime')`
+    `SELECT
+       COALESCE((SELECT SUM(COALESCE(o.total,0) - COALESCE(v.tutar,0))
+                 FROM orders o
+                 LEFT JOIN (${VERESIYE_PER_ORDER}) v ON v.order_id = o.id
+                 WHERE o.status='completed'
+                   AND date(o.closed_at, 'localtime') = date('now','localtime')), 0)
+     + COALESCE((SELECT SUM(p.amount) FROM payments p
+                 WHERE p.payment_method='veresiye' AND p.settled_at IS NOT NULL
+                   AND date(p.settled_at, 'localtime') = date('now','localtime')), 0)`
   )
   return res[0]?.values[0][0] ?? 0
 }
@@ -2094,6 +2102,77 @@ function _businessDayOf(iso, closuresAsc = []) {
   return asLocal(start)
 }
 
+// ── Veresiye ve ciro ──────────────────────────────────────────────
+// Veresiye SATIŞ anında ciroya girmez — para kasaya girmemiştir. Tahsil
+// edildiğinde, TAHSİL TARİHİNE göre girer. Bu yüzden her ciro sorgusu iki
+// parçanın toplamıdır:
+//
+//   1. Dönemde kapanan siparişlerin toplamı EKSİ o siparişlerin veresiye payı
+//   2. Dönemde TAHSİL EDİLEN veresiye tutarları (closed_at değil, settled_at)
+//
+// Bir siparişin veresiye payı payments tablosundan geliyor: hem tam veresiye
+// hem parçalı (split) siparişi aynı şekilde ele alır ve tahsilat kaydıyla
+// birebir aynı tutarı kullanır — orders.veresiye_amount ile payments arasında
+// yuvarlama farkı oluşamaz. Müşterinin veritabanında payments satırı olmayan
+// veresiye sipariş yok (kontrol edildi), yani bu kaynak eksiksiz.
+const VERESIYE_PER_ORDER = `
+  SELECT order_id, SUM(amount) AS tutar
+  FROM payments WHERE payment_method = 'veresiye' GROUP BY order_id`
+
+// (zaman, tutar) çiftleri döndürür — çağıran taraf ister saate, ister iş
+// gününe, ister aya gruplar. İki kaynak da aynı şekle sahip olduğu için
+// gruplama mantığı hiç değişmeden çalışıyor.
+function _revenueRows(startIso, endIso) {
+  const params = []
+  const salesWhere = []
+  if (startIso) { salesWhere.push('o.closed_at >= ?') }
+  if (endIso)   { salesWhere.push('o.closed_at < ?') }
+  if (startIso) params.push(startIso)
+  if (endIso)   params.push(endIso)
+
+  const settledWhere = ["p.payment_method = 'veresiye'", 'p.settled_at IS NOT NULL']
+  if (startIso) { settledWhere.push('p.settled_at >= ?'); params.push(startIso) }
+  if (endIso)   { settledWhere.push('p.settled_at < ?');  params.push(endIso) }
+
+  const sql = `
+    SELECT o.closed_at AS ts, COALESCE(o.total,0) - COALESCE(v.tutar,0) AS tutar
+    FROM orders o
+    LEFT JOIN (${VERESIYE_PER_ORDER}) v ON v.order_id = o.id
+    WHERE o.status = 'completed'${salesWhere.length ? ' AND ' + salesWhere.join(' AND ') : ''}
+    UNION ALL
+    SELECT p.settled_at AS ts, p.amount AS tutar
+    FROM payments p
+    WHERE ${settledWhere.join(' AND ')}`
+
+  const res = db.exec(sql, params)
+  return res.length ? res[0].values : []
+}
+
+// Dönemde tahsil edilen veresiyenin yöntem bazında dökümü. Tahsilat
+// yapıldığında para o yöntemle kasaya girer, o yüzden ödeme dağılımında
+// nakit/kart/IBAN kovalarına eklenmesi gerekiyor.
+export function getSettledVeresiyeByMethod(startIso, endIso) {
+  requireDb()
+  const where = ["payment_method = 'veresiye'", 'settled_at IS NOT NULL']
+  const params = []
+  if (startIso) { where.push('settled_at >= ?'); params.push(startIso) }
+  if (endIso)   { where.push('settled_at < ?');  params.push(endIso) }
+  const res = db.exec(
+    `SELECT COALESCE(NULLIF(settled_method,''),'cash') AS yontem, COALESCE(SUM(amount),0)
+     FROM payments WHERE ${where.join(' AND ')} GROUP BY yontem`,
+    params
+  )
+  const out = { cash: 0, card: 0, iban: 0, total: 0 }
+  if (res.length) {
+    for (const [method, amount] of res[0].values) {
+      const key = ['cash', 'card', 'iban'].includes(method) ? method : 'cash'
+      out[key] += Number(amount) || 0
+      out.total += Number(amount) || 0
+    }
+  }
+  return out
+}
+
 export function getRevenueByPeriod(mode, rangeStart, rangeEnd, closures = []) {
   requireDb()
   const pad = n => String(n).padStart(2, '0')
@@ -2101,13 +2180,9 @@ export function getRevenueByPeriod(mode, rangeStart, rangeEnd, closures = []) {
   // Aralıktaki tamamlanmış satışları çek; kovalama JS tarafında yapılıyor
   // çünkü iş günü sınırları SQL'de ifade edilemiyor (kapanış anları veriye
   // değil, ayrı bir tabloya dayanıyor).
-  const { clause, params } = _dateClause(rangeStart, rangeEnd)
-  const res = db.exec(
-    `SELECT closed_at, COALESCE(total,0) FROM orders
-     WHERE status='completed' ${clause}`,
-    params
-  )
-  const rows = res.length ? res[0].values : []
+  // Satışlar (veresiye düşülmüş) + dönemde tahsil edilen veresiye.
+  // Bkz. _revenueRows.
+  const rows = _revenueRows(rangeStart, rangeEnd)
 
   // ── Tek gün: saatlik döküm ──
   if (mode === 'today' || mode === 'yesterday' || mode === 'day') {
@@ -2178,18 +2253,23 @@ export function getPaymentBreakdown(startIso, endIso) {
        COALESCE(SUM(CASE WHEN payment_method='iban'  THEN total
                          WHEN payment_method='split' THEN COALESCE(iban_amount,0)
                          ELSE 0 END), 0) as iban,
-       COALESCE(SUM(CASE WHEN payment_method='veresiye' THEN total
-                         WHEN payment_method='split'    THEN COALESCE(veresiye_amount,0)
-                         ELSE 0 END), 0) as veresiye
+       0 as veresiye
      FROM orders WHERE status='completed' ${clause}`,
     params
   )
-  const [nakit, kart, iban, veresiye] = res[0]?.values[0] ?? [0, 0, 0, 0]
+  const [nakit, kart, iban] = res[0]?.values[0] ?? [0, 0, 0]
+
+  // Nakit/kart/IBAN kovaları satış anında zaten veresiyeyi içermiyordu
+  // (veresiye siparişte total tamamen veresiye, split'te ayrı kolonda).
+  // Değişen şey: veresiye artık ayrı bir kova olarak GÖSTERİLMİYOR, çünkü
+  // o para kasaya girmemiştir. Tahsil edildiğinde hangi yöntemle alındıysa
+  // (settled_method) o kovaya, tahsil tarihiyle ekleniyor.
+  const settled = getSettledVeresiyeByMethod(startIso, endIso)
+
   return [
-    { name: 'Nakit',    value: nakit },
-    { name: 'Kart',     value: kart },
-    { name: 'IBAN',     value: iban },
-    { name: 'Veresiye', value: veresiye },
+    { name: 'Nakit', value: nakit + settled.cash },
+    { name: 'Kart',  value: kart  + settled.card },
+    { name: 'IBAN',  value: iban  + settled.iban },
   ]
 }
 
@@ -2256,10 +2336,14 @@ export async function settleVeresiye(paymentId, method) {
   if (!['cash', 'card', 'iban'].includes(method)) {
     throw new Error('Geçersiz tahsilat yöntemi: ' + method)
   }
+  // settled_at IS NULL şartı: aynı borcun iki kez tahsil edilmesini engeller.
+  // Bu artık ciroyu da etkiliyor — ikinci tahsilat, tarihi değiştirip tutarı
+  // başka bir güne kaydırırdı. Ayrıca ekranda iki kişi aynı anda
+  // "tahsil et" derse ikinci çağrı hiçbir satırı güncellemez.
   // is_synced sıfırlanır ki tahsilat bir sonraki turda Supabase'e de gitsin.
   db.run(
     `UPDATE payments SET settled_at = ?, settled_method = ?, is_synced = 0
-     WHERE id = ? AND payment_method = 'veresiye'`,
+     WHERE id = ? AND payment_method = 'veresiye' AND settled_at IS NULL`,
     [new Date().toISOString(), method, paymentId]
   )
   await persistDb()
@@ -2282,12 +2366,18 @@ export async function unsettleVeresiye(paymentId) {
 export function getPaymentMethodDetail(startIso, endIso) {
   requireDb()
   const { clause, params } = _dateClause(startIso, endIso)
+  // netRevenue de veresiyeyi satış anında saymıyor, tahsil edildiği dönemde
+  // sayıyor — bkz. _revenueRows. İndirim satış anına ait kalıyor.
   const res = db.exec(
-    `SELECT COALESCE(SUM(discount),0), COALESCE(SUM(total),0)
-     FROM orders WHERE status='completed' ${clause}`,
+    `SELECT COALESCE(SUM(discount),0),
+            COALESCE(SUM(COALESCE(o.total,0) - COALESCE(v.tutar,0)),0)
+     FROM orders o
+     LEFT JOIN (${VERESIYE_PER_ORDER}) v ON v.order_id = o.id
+     WHERE o.status='completed' ${clause.replace(/closed_at/g, 'o.closed_at')}`,
     params
   )
-  const [discount, netRevenue] = res[0]?.values[0] ?? [0, 0]
+  const [discount, salesNet] = res[0]?.values[0] ?? [0, 0]
+  const netRevenue = Number(salesNet) + getSettledVeresiyeByMethod(startIso, endIso).total
 
   const pointsRes = db.exec(
     `SELECT COALESCE(SUM(p.amount),0)

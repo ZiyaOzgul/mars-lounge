@@ -6,7 +6,8 @@ import {
 } from 'recharts'
 import {
   getReportKpis, getTopProduct, getRevenueByPeriod,
-  getPaymentBreakdown, getPaymentMethodDetail, getVeresiyeSummary, getTableRevenue, getTopProducts, getProductSalesDetail,
+  getPaymentBreakdown, getPaymentMethodDetail, getVeresiyeSummary, getSettledVeresiyeByMethod,
+  getTableRevenue, getTopProducts, getProductSalesDetail,
   getTableProductBreakdown, getProductTableBreakdown,
   getCategoryRevenue, getIngredientConsumption,
   getOrdersList, getOrderItems,
@@ -69,9 +70,18 @@ function Reports() {
   const [paymentData,  setPaymentData]  = useState([{ name: 'Nakit', value: 0 }, { name: 'Kart', value: 0 }, { name: 'IBAN', value: 0 }, { name: 'Veresiye', value: 0 }])
   const [veresiye,     setVeresiye]     = useState({ periodTotal: 0, openTotal: 0 })
   const [closures,     setClosures]     = useState([])
+  // Tahsil edilen veresiye tutari — bilgi satirinda gosteriliyor.
+  const [settledVeresiye, setSettledVeresiye] = useState(0)
+
+  // ESKI NOT (artik gecerli degil): veresiye cirodan bir arayuz anahtariyla
+  // dusuluyordu. Simdi kural veri katmaninda: veresiye satis aninda hic
+  // ciroya girmiyor, TAHSIL edildiginde tahsil tarihine giriyor
+  // (bkz. localDb._revenueRows). Anahtar kaldirildi — ayni sayinin iki
+  // farkli yerde iki farkli kuralla hesaplanmasi kafa karisikligi
+  // yaratiyordu.
   // Veresiye parasi henuz kasaya girmedigi icin varsayilan olarak cirodan
   // dusuluyor. Kapatinca satis anindaki ciro gorunur.
-  const [veresiyeExcluded, setVeresiyeExcluded] = useState(true)
+
   const [paymentDetail, setPaymentDetail] = useState({ discount: 0, points: 0, netRevenue: 0, grossRevenue: 0 })
   const [tableRevData, setTableRevData] = useState([])
   const [topProducts,  setTopProducts]  = useState([])
@@ -98,6 +108,7 @@ function Reports() {
     setPaymentData(getPaymentBreakdown(start, end))
     setPaymentDetail(getPaymentMethodDetail(start, end))
     setVeresiye(getVeresiyeSummary(start, end))
+    setSettledVeresiye(getSettledVeresiyeByMethod(start, end).total)
     setTableRevData(getTableRevenue(start, end))
     setTopProducts(getTopProducts(start, end))
     setDetailData(getProductSalesDetail(start, end))
@@ -398,12 +409,21 @@ function Reports() {
                   <span>
                     Veresiye verilen
                     <em className="rpt-pay-detail__hint">
-                      {veresiye.openTotal > 0
-                        ? `${fmtCurrency(veresiye.openTotal)} tahsil edilmedi`
-                        : 'tamamı tahsil edildi'}
+                      ciroya dahil değil — tahsil edildiğinde eklenir
                     </em>
                   </span>
                   <span>{fmtCurrency(veresiye.periodTotal)}</span>
+                </div>
+              )}
+              {settledVeresiye > 0 && (
+                <div className="rpt-pay-detail__row rpt-pay-detail__row--veresiye">
+                  <span>
+                    Bu dönem tahsil edilen veresiye
+                    <em className="rpt-pay-detail__hint">
+                      ciroya dahil — önceki dönemlerden kalanlar da olabilir
+                    </em>
+                  </span>
+                  <span>+ {fmtCurrency(settledVeresiye)}</span>
                 </div>
               )}
               <div className="rpt-pay-detail__row rpt-pay-detail__row--discount">
@@ -413,33 +433,19 @@ function Reports() {
               <div className="rpt-pay-detail__divider" />
               <div className="rpt-pay-detail__row">
                 <span>Ciro (indirimsiz / brüt)</span>
-                <span>
-                  {fmtCurrency(paymentDetail.grossRevenue - (veresiyeExcluded ? veresiye.openTotal : 0))}
-                </span>
+                <span>{fmtCurrency(paymentDetail.grossRevenue)}</span>
               </div>
               <div className="rpt-pay-detail__row rpt-pay-detail__row--net">
                 <span>Ciro (indirimli / net)</span>
-                <span>
-                  {fmtCurrency(paymentDetail.netRevenue - (veresiyeExcluded ? veresiye.openTotal : 0))}
-                </span>
+                <span>{fmtCurrency(paymentDetail.netRevenue)}</span>
               </div>
 
               {veresiye.periodTotal > 0 && (
-                <label className="rpt-veresiye-toggle">
-                  <input
-                    type="checkbox"
-                    checked={veresiyeExcluded}
-                    onChange={e => setVeresiyeExcluded(e.target.checked)}
-                  />
-                  <span>
-                    Veresiyeyi cirodan düş
-                    <em>
-                      {veresiyeExcluded
-                        ? 'Tahsil edilmemiş veresiye ciroya girmiyor. Ödendi işaretlenince otomatik eklenir.'
-                        : 'Tahsil edilmemiş veresiye de ciroya dahil.'}
-                    </em>
-                  </span>
-                </label>
+                <p className="rpt-veresiye-note">
+                  Veresiye ciroya satıldığı gün değil, <strong>tahsil edildiği
+                  gün</strong> yazılır. Veresiyeler sayfasından "tahsil edildi"
+                  işaretlendiğinde o günün cirosuna eklenir.
+                </p>
               )}
             </div>
           </div>

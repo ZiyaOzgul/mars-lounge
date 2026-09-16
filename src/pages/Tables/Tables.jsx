@@ -182,13 +182,25 @@ function Tables() {
       ? Math.max(0, Math.floor((Date.now() - new Date(newOrder.created_at).getTime()) / 60000))
       : 0
 
+    // Realtime, orders satiri eklendigi ANDA tetikleniyor; web tarafi
+    // order_items'i AYRI bir istekle hemen sonra yaziyor. Yani ilk sorgu
+    // kalemleri henuz gormeyebilir ve onay ekrani "Sipariş detayları
+    // bekleniyor..." diye bos kalir. Kisa araliklarla birkac kez deniyoruz.
     let orderItems = []
-    try {
+    const fetchItems = async () => {
       const { data, error } = await supabase
         .from('order_items')
         .select('id, quantity, unit_price, products(name), order_item_modifiers(id, modifier_id, name, price_delta, quantity)')
         .eq('order_id', newOrder.id)
-      if (error) console.warn('[QR-DEBUG] order_items query error:', error)
+      if (error) { console.warn('[QR-DEBUG] order_items query error:', error); return null }
+      return data
+    }
+    try {
+      let data = await fetchItems()
+      for (let attempt = 0; (!data || data.length === 0) && attempt < 3; attempt++) {
+        await new Promise(r => setTimeout(r, 400))
+        data = await fetchItems()
+      }
       if (data) {
         orderItems = data.map(item => ({
           id:        item.id,
@@ -212,12 +224,21 @@ function Tables() {
     console.log('[QR-DEBUG] Pushing to qrQueue:', { tableId: newOrder.table_id, orderId: newOrder.id, itemCount: orderItems.length })
     // Realtime can re-deliver on reconnect, and the catch-up sweep re-reads
     // the same rows — never queue the same order twice
-    setQrQueue(prev => prev.some(q => q.orderId === newOrder.id) ? prev : [...prev, {
-      tableId:    newOrder.table_id,
-      orderId:    newOrder.id,
-      openMinutes,
-      orderItems,
-    }])
+    // De-dupe, ama KORU DEGIL GUNCELLE: kuyruktaki kayit kalemsiz kalmissa
+    // (ilk sorgu yarisi kaybetmisti) ve bu turda kalemler geldiyse, eski
+    // kaydin uzerine yaziyoruz. Eskiden `prev` aynen donuyordu ve bos
+    // kalem listesi kalici hale geliyordu — 45 saniyelik tarama da
+    // duzeltemiyordu.
+    const entry = { tableId: newOrder.table_id, orderId: newOrder.id, openMinutes, orderItems }
+    setQrQueue(prev => {
+      const idx = prev.findIndex(q => q.orderId === newOrder.id)
+      if (idx === -1) return [...prev, entry]
+      const mevcut = prev[idx]
+      if ((mevcut.orderItems?.length ?? 0) > 0 || orderItems.length === 0) return prev
+      const next = [...prev]
+      next[idx] = { ...mevcut, orderItems }
+      return next
+    })
     setRuntimeStates(prev => ({
       ...prev,
       [newOrder.table_id]: {

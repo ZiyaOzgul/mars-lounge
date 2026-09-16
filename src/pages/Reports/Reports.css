@@ -698,6 +698,22 @@
   margin-top: 2px;
 }
 
+/* Veresiye kurali aciklamasi. Eskiden burada bir onay kutusu vardi
+   (.rpt-veresiye-toggle); kural veri katmanina tasindigi icin yerini
+   sabit bir bilgi notu aldi. */
+.rpt-veresiye-note {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--color-border);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+}
+
+.rpt-veresiye-note strong {
+  color: var(--color-text-primary);
+}
+
 .rpt-veresiye-toggle {
   display: flex;
   align-items: flex-start;
