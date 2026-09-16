@@ -15,6 +15,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     list: () => ipcRenderer.invoke('backup:list'),
     open: () => ipcRenderer.invoke('backup:open'),
   },
+  // Guncelleme: Ayarlar ekranindaki "Guncelleme Kontrol Et" butonu.
+  updates: {
+    status:  () => ipcRenderer.invoke('updates:status'),
+    check:   () => ipcRenderer.invoke('updates:check'),
+    install: () => ipcRenderer.invoke('updates:install'),
+  },
   // Donma/çökme incelemesi için log dosyasını Explorer'da göster.
   logs: {
     reveal: () => ipcRenderer.invoke('logs:reveal'),

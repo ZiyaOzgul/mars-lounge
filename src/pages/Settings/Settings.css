@@ -1427,3 +1427,24 @@
   justify-content: center;
   color: var(--color-text-muted);
 }
+
+/* Kurulmayi bekleyen guncelleme satiri — dikkat cekmeli, cunku musterinin
+   bunu gormesi teslimat sorununu tek tikla cozuyor. */
+.st-quick-row--update {
+  border-color: var(--color-accent);
+  background: var(--color-accent-light);
+  color: var(--color-accent);
+  font-weight: 700;
+}
+
+.st-version-badge--ready {
+  background: var(--color-accent);
+  color: #fff;
+}
+
+.st-update-msg {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+}

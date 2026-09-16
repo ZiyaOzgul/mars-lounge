@@ -22,6 +22,17 @@ const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000
 // güncelleme varsa reload yerine kurulum yapılıyor.
 let pendingUpdate = null
 
+// Ayarlar ekranindaki "Guncelleme Kontrol Et" bu durumu okuyor. O buton
+// eskiden onClick'i olmayan bir suslemeydi ve yaninda sabit "v1.0.0"
+// yaziyordu — musteri oraya bakarak yanlis surumde oldugunu sanabilirdi.
+const updateState = {
+  checking: false,
+  pending: null,        // indirilmis, kurulmayi bekleyen surum
+  upToDate: false,      // son kontrolde guncel oldugu dogrulandi
+  error: null,
+  lastCheckedAt: null,
+}
+
 protocol.registerSchemesAsPrivileged([
   { scheme: 'app-image', privileges: { standard: true, secure: true, supportFetchAPI: true, bypassCSP: true, stream: true } },
 ])
@@ -63,10 +74,32 @@ function setupAutoUpdater() {
 
   autoUpdater.autoInstallOnAppQuit = true
 
+  autoUpdater.on('checking-for-update', () => {
+    updateState.checking = true
+    updateState.error = null
+  })
+
+  autoUpdater.on('update-not-available', () => {
+    updateState.checking = false
+    updateState.upToDate = true
+    updateState.lastCheckedAt = Date.now()
+  })
+
+  autoUpdater.on('update-available', (info) => {
+    updateState.checking = false
+    updateState.upToDate = false
+    updateState.lastCheckedAt = Date.now()
+    logLine(`[auto-updater] v${info?.version} bulundu — indiriliyor`)
+  })
+
   autoUpdater.on('update-downloaded', async (info) => {
     // Gece bakımı bunu görüp kurulumu kendisi tamamlayacak — bkz.
     // pendingUpdate ve requestMaintenanceReload.
     pendingUpdate = info.version || 'bilinmiyor'
+    updateState.checking = false
+    updateState.pending = pendingUpdate
+    updateState.upToDate = false
+    updateState.lastCheckedAt = Date.now()
     logLine(`[auto-updater] v${pendingUpdate} indirildi — kurulum yeniden baslatmayi bekliyor`)
     const { response } = await dialog.showMessageBox({
       type: 'info',
@@ -85,7 +118,9 @@ function setupAutoUpdater() {
   })
 
   autoUpdater.on('error', (err) => {
-    console.error('[auto-updater] error:', err)
+    updateState.checking = false
+    updateState.error = String((err && err.message) || err)
+    logLine(`[auto-updater] hata: ${updateState.error}`, 'error')
   })
 
   checkForUpdates()
@@ -586,6 +621,52 @@ async function takeBackup(reason, { force = false } = {}) {
     return { ok: false, error: String((e && e.message) || e) }
   }
 }
+
+// ── Guncelleme IPC ────────────────────────────────────────────────
+ipcMain.handle('updates:status', () => ({
+  version: app.getVersion(),
+  packaged: app.isPackaged,
+  ...updateState,
+}))
+
+ipcMain.handle('updates:check', async () => {
+  if (!app.isPackaged) {
+    return { ok: false, error: 'Gelistirme modunda guncelleme kontrolu yapilamaz' }
+  }
+  try {
+    updateState.checking = true
+    updateState.error = null
+    const res = await autoUpdater.checkForUpdates()
+    const found = res?.updateInfo?.version
+    // checkForUpdates, mevcut surumle ayni surumu de dondurebiliyor;
+    // "guncel" karari olaylardan geliyor (update-not-available).
+    return { ok: true, found: found || null, ...updateState }
+  } catch (e) {
+    updateState.checking = false
+    updateState.error = String((e && e.message) || e)
+    return { ok: false, error: updateState.error }
+  }
+})
+
+// Bekleyen guncellemeyi HEMEN kurar. Gece bakim penceresini beklemeden,
+// kasiyer/yonetici hazir oldugunda tek tikla. quitAndInstall uygulamayi
+// kapatip yeni surumle acar — bu yuzden cagiran taraf once onay almali.
+ipcMain.handle('updates:install', () => {
+  if (!app.isPackaged) return { ok: false, error: 'Gelistirme modunda kurulum yapilamaz' }
+  if (!pendingUpdate) return { ok: false, error: 'Kurulmayi bekleyen bir guncelleme yok' }
+  try {
+    logLine(`[auto-updater] v${pendingUpdate} elle kuruluyor (Ayarlar)`)
+    // Hemen donebilmek icin bir tick sonra kapatiyoruz, yoksa renderer
+    // cevabi hic almadan surec oluyor.
+    setTimeout(() => {
+      try { autoUpdater.quitAndInstall(true, true) }
+      catch (err) { logLine(`[auto-updater] elle kurulum basarisiz: ${err && err.message}`, 'error') }
+    }, 250)
+    return { ok: true, version: pendingUpdate }
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) }
+  }
+})
 
 ipcMain.handle('backup:now', (_e, opts) => takeBackup('elle', { force: true, ...(opts || {}) }))
 ipcMain.handle('backup:list', () => listBackups())

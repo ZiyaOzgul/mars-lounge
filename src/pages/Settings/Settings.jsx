@@ -851,6 +851,58 @@ function Settings() {
   const [cafeInfo, setCafeInfo] = useState(loadCafeInfo);
   const [savedToast, setSavedToast] = useState(false);
 
+  // ── Güncelleme ──────────────────────────────────────────────────
+  // Bu butonun eskiden onClick'i YOKTU ve yanında sabit "v1.0.0" yazıyordu —
+  // yani hiçbir işe yaramıyor, üstelik yanlış sürüm gösteriyordu. Müşteri
+  // oraya bakıp güncel sandığında ya da 1.0.0'da olduğunu düşündüğünde
+  // teşhis tamamen yanlış yöne gidiyordu.
+  const [updateInfo, setUpdateInfo] = useState(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateMsg, setUpdateMsg] = useState(null);
+
+  const refreshUpdateStatus = async () => {
+    if (!window.electronAPI?.updates?.status) return;
+    try { setUpdateInfo(await window.electronAPI.updates.status()); }
+    catch (e) { console.warn("[Settings] güncelleme durumu okunamadı", e); }
+  };
+
+  useEffect(() => { refreshUpdateStatus(); }, []);
+
+  const handleCheckUpdates = async () => {
+    if (!window.electronAPI?.updates?.check) return;
+    setUpdateBusy(true);
+    setUpdateMsg(null);
+    try {
+      const res = await window.electronAPI.updates.check();
+      await refreshUpdateStatus();
+      if (res?.ok === false) setUpdateMsg(res.error ?? "Kontrol edilemedi");
+      else if (res?.pending) setUpdateMsg(`v${res.pending} indirildi — kurmaya hazır.`);
+      else if (res?.found) setUpdateMsg(`v${res.found} bulundu, indiriliyor…`);
+      else setUpdateMsg("Uygulama güncel.");
+    } catch (e) {
+      setUpdateMsg(e.message ?? String(e));
+    } finally {
+      setUpdateBusy(false);
+    }
+  };
+
+  // Uygulamayı kapatıp yeni sürümle açar — bu yüzden onay alıyoruz.
+  const handleInstallUpdate = async () => {
+    if (!window.electronAPI?.updates?.install) return;
+    setUpdateBusy(true);
+    setUpdateMsg("Kuruluyor — uygulama birazdan kapanıp yeniden açılacak…");
+    try {
+      const res = await window.electronAPI.updates.install();
+      if (res?.ok === false) {
+        setUpdateMsg(res.error ?? "Kurulum başlatılamadı");
+        setUpdateBusy(false);
+      }
+    } catch (e) {
+      setUpdateMsg(e.message ?? String(e));
+      setUpdateBusy(false);
+    }
+  };
+
   // ── Veritabanı yedekleri ────────────────────────────────────────
   // Yedekler ana süreçte otomatik alınıyor; buradaki arayüz sadece
   // görünürlük ve elle yedek için. Liste okunamıyorsa (tarayıcıda
@@ -1468,7 +1520,11 @@ function Settings() {
                         <polyline points="9 18 15 12 9 6" />
                       </svg>
                     </button>
-                    <button className="st-quick-row">
+                    <button
+                      className="st-quick-row"
+                      onClick={handleCheckUpdates}
+                      disabled={updateBusy}
+                    >
                       <svg
                         width="16"
                         height="16"
@@ -1483,9 +1539,45 @@ function Settings() {
                         <polyline points="1 20 1 14 7 14" />
                         <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
                       </svg>
-                      <span>Güncelleme Kontrol Et</span>
-                      <span className="st-version-badge">v1.0.0</span>
+                      <span>
+                        {updateBusy ? "Kontrol ediliyor…" : "Güncelleme Kontrol Et"}
+                      </span>
+                      <span className="st-version-badge">
+                        v{updateInfo?.version ?? "?"}
+                      </span>
                     </button>
+
+                    {/* İndirilmiş ama kurulmamış sürüm. Gece bakımını
+                        beklemeden buradan kurulabiliyor — müşteriye telefonda
+                        "Ayarlar'dan güncelle" demek yetiyor. */}
+                    {updateInfo?.pending && (
+                      <button
+                        className="st-quick-row st-quick-row--update"
+                        onClick={handleInstallUpdate}
+                        disabled={updateBusy}
+                      >
+                        <svg
+                          width="16"
+                          height="16"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                          <polyline points="7 10 12 15 17 10" />
+                          <line x1="12" y1="15" x2="12" y2="3" />
+                        </svg>
+                        <span>Şimdi Kur ve Yeniden Başlat</span>
+                        <span className="st-version-badge st-version-badge--ready">
+                          v{updateInfo.pending} hazır
+                        </span>
+                      </button>
+                    )}
+
+                    {updateMsg && <p className="st-update-msg">{updateMsg}</p>}
                   </div>
                 </div>
               </div>
