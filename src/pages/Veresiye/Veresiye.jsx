@@ -3,10 +3,12 @@ import { useApp } from '../../context/AppContext.jsx'
 import {
   getVeresiyeLedger,
   getVeresiyeByPerson,
-  settleVeresiye,
+  settleVeresiyeMany,
   unsettleVeresiye,
+  deleteVeresiye,
   isDbInitialized,
 } from '../../lib/localDb.js'
+import ConfirmModal from '../../components/ConfirmModal/ConfirmModal.jsx'
 import './Veresiye.css'
 
 const STATUS_TABS = [
@@ -47,6 +49,11 @@ function Veresiye() {
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const [busyId, setBusyId] = useState(null)
+  // Secili borc kayitlari (payment id). Ayni kisinin birden fazla borcu
+  // alt alta siralanip kafa karistirmasin diye kisi bazinda gruplanıyor ve
+  // tahsilat/silme secim uzerinden yapılıyor.
+  const [selected, setSelected] = useState(() => new Set())
+  const [deleteTarget, setDeleteTarget] = useState(null)
 
   const reload = useCallback((nextStatus) => {
     if (!isDbInitialized()) return
@@ -79,13 +86,89 @@ function Veresiye() {
   const shownTotal = filtered.reduce((s, r) => s + Number(r.amount || 0), 0)
   const openTotal = people.reduce((s, p) => s + Number(p.total || 0), 0)
 
-  const handleSettle = async (id, method) => {
-    setBusyId(id)
+  // Kisi bazinda grupla. Ayni isimden birden fazla borc varsa tek kart
+  // altinda toplanıyor.
+  const grouped = useMemo(() => {
+    const map = new Map()
+    for (const r of filtered) {
+      if (!map.has(r.name)) map.set(r.name, [])
+      map.get(r.name).push(r)
+    }
+    return [...map.entries()]
+      .map(([name, list]) => {
+        const open = list.filter((r) => !r.settledAt)
+        return {
+          name,
+          rows: list,
+          total: list.reduce((s, r) => s + Number(r.amount || 0), 0),
+          openRows: open,
+          openTotal: open.reduce((s, r) => s + Number(r.amount || 0), 0),
+        }
+      })
+      .sort((a, b) => b.openTotal - a.openTotal || a.name.localeCompare(b.name, 'tr'))
+  }, [filtered])
+
+  // Filtre/sekme degisince secim gecersiz kalir — ekranda gorunmeyen bir
+  // kaydin secili kalmasi ve yanlislikla tahsil edilmesi tehlikeli.
+  useEffect(() => { setSelected(new Set()) }, [status, search, dateFrom, dateTo])
+
+  const toggleOne = (id) => setSelected((prev) => {
+    const next = new Set(prev)
+    if (next.has(id)) next.delete(id); else next.add(id)
+    return next
+  })
+
+  const toggleGroup = (g) => setSelected((prev) => {
+    const next = new Set(prev)
+    const ids = g.openRows.map((r) => r.id)
+    const hepsiSecili = ids.length > 0 && ids.every((id) => next.has(id))
+    for (const id of ids) { if (hepsiSecili) next.delete(id); else next.add(id) }
+    return next
+  })
+
+  const groupSelection = (g) => {
+    const ids = g.openRows.filter((r) => selected.has(r.id)).map((r) => r.id)
+    const tutar = g.openRows
+      .filter((r) => selected.has(r.id))
+      .reduce((s, r) => s + Number(r.amount || 0), 0)
+    return { ids, tutar }
+  }
+
+  const handleSettleSelected = async (g, method) => {
+    const { ids } = groupSelection(g)
+    if (!ids.length) return
+    setBusyId(g.name)
     try {
-      await settleVeresiye(id, method)
+      await settleVeresiyeMany(ids, method)
+      setSelected(new Set())
       reload(status)
     } catch (e) {
       console.error('[Veresiye] tahsilat başarısız', e)
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  const requestDelete = (g) => {
+    const { ids, tutar } = groupSelection(g)
+    if (!ids.length) return
+    setDeleteTarget({ name: g.name, ids, tutar })
+  }
+
+  const handleDeleteConfirmed = async () => {
+    if (!deleteTarget) return
+    const { ids } = deleteTarget
+    setBusyId(deleteTarget.name)
+    try {
+      for (const id of ids) {
+        const res = await deleteVeresiye(id)
+        if (res?.ok === false) console.warn('[Veresiye] silinemedi', id, res.error)
+      }
+      setSelected(new Set())
+      setDeleteTarget(null)
+      reload(status)
+    } catch (e) {
+      console.error('[Veresiye] silme başarısız', e)
     } finally {
       setBusyId(null)
     }
@@ -187,67 +270,154 @@ function Veresiye() {
       ) : (
         <>
           <div className="vsy-count">
-            {filtered.length} kayıt · toplam {fmtTL(shownTotal)}
+            {grouped.length} kişi · {filtered.length} kayıt · toplam {fmtTL(shownTotal)}
           </div>
-          <div className="vsy-rows">
-            {filtered.map((r) => (
-              <div key={r.id} className={`vsy-row${r.settledAt ? ' vsy-row--settled' : ''}`}>
-                <div className="vsy-row__main">
-                  <span className="vsy-row__name">{r.name}</span>
-                  <span className="vsy-row__meta">
-                    {fmtDateTime(r.createdAt)}
-                    {r.tableName ? ` · ${r.tableName}` : ''}
-                  </span>
-                </div>
 
-                <div className="vsy-row__status">
-                  {r.settledAt ? (
-                    <span className="vsy-badge vsy-badge--paid">Ödendi</span>
-                  ) : (
-                    <span className="vsy-badge vsy-badge--open">Ödenmedi</span>
-                  )}
-                </div>
+          <div className="vsy-groups">
+            {grouped.map((g) => {
+              const { ids: seciliIds, tutar: seciliTutar } = groupSelection(g)
+              const hepsiSecili =
+                g.openRows.length > 0 && g.openRows.every((r) => selected.has(r.id))
+              const grupMesgul = busyId === g.name
 
-                <strong className="vsy-row__amount">{fmtTL(r.amount)}</strong>
+              return (
+                <div key={g.name} className="vsy-group">
+                  {/* Kişi başlığı */}
+                  <div className="vsy-group__header">
+                    {g.openRows.length > 0 && (
+                      <label className="vsy-check vsy-check--all">
+                        <input
+                          type="checkbox"
+                          checked={hepsiSecili}
+                          onChange={() => toggleGroup(g)}
+                          disabled={grupMesgul}
+                        />
+                      </label>
+                    )}
+                    <span className="vsy-group__name">{g.name}</span>
+                    <span className="vsy-group__count">
+                      {g.rows.length} kayıt
+                      {g.openRows.length > 0 && g.openRows.length !== g.rows.length
+                        ? ` · ${g.openRows.length} açık`
+                        : ''}
+                    </span>
+                    <strong className="vsy-group__total">
+                      {g.openTotal > 0 ? fmtTL(g.openTotal) : fmtTL(g.total)}
+                    </strong>
+                  </div>
 
-                <div className="vsy-row__actions">
-                  {r.settledAt ? (
-                    <>
-                      <span className="vsy-settled-info">
-                        {fmtDateTime(r.settledAt)}
-                        {r.settledMethod ? ` · ${
-                          SETTLE_METHODS.find((m) => m.id === r.settledMethod)?.label ?? r.settledMethod
-                        }` : ''}
-                      </span>
-                      <button
-                        className="vsy-undo"
-                        disabled={busyId === r.id}
-                        onClick={() => handleUnsettle(r.id)}
+                  {/* Borç satırları */}
+                  <div className="vsy-group__rows">
+                    {g.rows.map((r) => (
+                      <div
+                        key={r.id}
+                        className={`vsy-row${r.settledAt ? ' vsy-row--settled' : ''}${
+                          selected.has(r.id) ? ' vsy-row--selected' : ''
+                        }`}
                       >
-                        Geri al
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      <span className="vsy-hint">Tahsil et:</span>
-                      {SETTLE_METHODS.map((m) => (
+                        {r.settledAt ? (
+                          <span className="vsy-check vsy-check--placeholder" aria-hidden="true" />
+                        ) : (
+                          <label className="vsy-check">
+                            <input
+                              type="checkbox"
+                              checked={selected.has(r.id)}
+                              onChange={() => toggleOne(r.id)}
+                              disabled={grupMesgul}
+                            />
+                          </label>
+                        )}
+
+                        <div className="vsy-row__main">
+                          <span className="vsy-row__meta">
+                            {fmtDateTime(r.createdAt)}
+                            {r.tableName ? ` · ${r.tableName}` : ''}
+                          </span>
+                        </div>
+
+                        <div className="vsy-row__status">
+                          {r.settledAt ? (
+                            <span className="vsy-badge vsy-badge--paid">Ödendi</span>
+                          ) : (
+                            <span className="vsy-badge vsy-badge--open">Ödenmedi</span>
+                          )}
+                        </div>
+
+                        <strong className="vsy-row__amount">{fmtTL(r.amount)}</strong>
+
+                        <div className="vsy-row__actions">
+                          {r.settledAt && (
+                            <>
+                              <span className="vsy-settled-info">
+                                {fmtDateTime(r.settledAt)}
+                                {r.settledMethod ? ` · ${
+                                  SETTLE_METHODS.find((m) => m.id === r.settledMethod)?.label ?? r.settledMethod
+                                }` : ''}
+                              </span>
+                              <button
+                                className="vsy-undo"
+                                disabled={busyId === r.id}
+                                onClick={() => handleUnsettle(r.id)}
+                              >
+                                Geri al
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Seçime uygulanan işlemler — tek, birkaç ya da hepsi */}
+                  {g.openRows.length > 0 && (
+                    <div className="vsy-group__actions">
+                      <span className="vsy-selinfo">
+                        {seciliIds.length > 0
+                          ? `${seciliIds.length} kayıt seçili · ${fmtTL(seciliTutar)}`
+                          : 'Tahsil etmek için kayıt seçin'}
+                      </span>
+                      <div className="vsy-group__buttons">
+                        {SETTLE_METHODS.map((m) => (
+                          <button
+                            key={m.id}
+                            className="vsy-settle"
+                            disabled={seciliIds.length === 0 || grupMesgul}
+                            onClick={() => handleSettleSelected(g, m.id)}
+                          >
+                            {m.label}
+                          </button>
+                        ))}
                         <button
-                          key={m.id}
-                          className="vsy-settle"
-                          disabled={busyId === r.id}
-                          onClick={() => handleSettle(r.id, m.id)}
+                          className="vsy-delete"
+                          disabled={seciliIds.length === 0 || grupMesgul}
+                          onClick={() => requestDelete(g)}
+                          title="Yanlışlıkla girilmiş veresiye kaydını sil"
                         >
-                          {m.label}
+                          Sil
                         </button>
-                      ))}
-                    </>
+                      </div>
+                    </div>
                   )}
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </>
       )}
+      <ConfirmModal
+        open={!!deleteTarget}
+        title="Veresiye kaydını sil"
+        message={deleteTarget
+          ? `${deleteTarget.name} adına ${deleteTarget.ids.length} kayıt (${fmtTL(deleteTarget.tutar)}) silinecek. ` +
+            'Tamamı veresiye olan siparişler İPTAL olarak işaretlenir; parçalı ödenmiş ' +
+            'siparişlerde yalnızca veresiye payı düşülür. Bu tutar hiçbir şekilde ciroya ' +
+            'girmez. İşlem geri alınamaz.'
+          : ''}
+        confirmText="Sil"
+        cancelText="Vazgeç"
+        onConfirm={handleDeleteConfirmed}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   )
 }

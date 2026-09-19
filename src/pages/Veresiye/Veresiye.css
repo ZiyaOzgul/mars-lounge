@@ -285,3 +285,147 @@
 
 .vsy-settle:disabled,
 .vsy-undo:disabled { opacity: 0.5; cursor: progress; }
+
+/* ── Kişi bazında gruplama ────────────────────────────────────────
+   Aynı isimden birden fazla borç alt alta sıralanınca defter okunmaz
+   hale geliyordu. Artık her kişi tek kart; borçlar kartın içinde,
+   seçilebilir. Tahsilat ve silme seçim üzerinden yapılıyor. */
+.vsy-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.vsy-group {
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  overflow: hidden;
+}
+
+.vsy-group__header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--color-bg-page);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.vsy-group__name {
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--color-text-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.vsy-group__count {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  flex: 1;
+}
+
+.vsy-group__total {
+  font-size: 17px;
+  font-weight: 800;
+  color: var(--color-warning);
+}
+
+.vsy-group__rows {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Grup içindeki satırlar kendi kartlarını taşımıyor — dış kart yeterli */
+.vsy-group__rows .vsy-row {
+  border: none;
+  border-left: 3px solid var(--color-warning);
+  border-bottom: 1px solid var(--color-border);
+  border-radius: 0;
+  background: var(--color-bg-card);
+}
+
+.vsy-group__rows .vsy-row:last-child {
+  border-bottom: none;
+}
+
+.vsy-row--selected {
+  background: var(--color-accent-light) !important;
+}
+
+/* ── Seçim kutuları ─────────────────────────────────────────────── */
+.vsy-check {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.vsy-check input {
+  width: 17px;
+  height: 17px;
+  accent-color: var(--color-accent);
+  cursor: pointer;
+}
+
+/* Tahsil edilmiş satırda kutu yok ama hizalama bozulmasın */
+.vsy-check--placeholder {
+  width: 17px;
+  flex-shrink: 0;
+}
+
+.vsy-check--all input {
+  accent-color: var(--color-warning);
+}
+
+/* ── Grup alt işlem çubuğu ──────────────────────────────────────── */
+.vsy-group__actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 11px 16px;
+  background: var(--color-bg-page);
+  border-top: 1px solid var(--color-border);
+}
+
+.vsy-selinfo {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  min-width: 160px;
+}
+
+.vsy-group__buttons {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.vsy-group__buttons button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* Silme: yanlışlıkla basılmaması gereken bir işlem, o yüzden ayrı renkte
+   ve diğer butonlardan görsel olarak uzakta. */
+.vsy-delete {
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 6px 12px;
+  margin-left: 6px;
+  border-radius: var(--radius-input);
+  border: 1px solid var(--color-danger);
+  background: var(--color-bg-card);
+  color: var(--color-danger);
+  cursor: pointer;
+}
+
+.vsy-delete:hover:not(:disabled) {
+  background: var(--color-danger);
+  color: #fff;
+}

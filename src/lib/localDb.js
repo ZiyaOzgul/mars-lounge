@@ -2349,6 +2349,100 @@ export async function settleVeresiye(paymentId, method) {
   await persistDb()
 }
 
+// Birden fazla borcu tek seferde tahsil eder — defter ekraninda bir kisinin
+// secili borclari icin. Tek tek settleVeresiye cagirmak yerine tek diske
+// yazma yapiyor: persistDb TUM veritabanini yaziyor, 5 borc icin 5 tam
+// yazma gereksiz.
+export async function settleVeresiyeMany(paymentIds, method) {
+  requireDb()
+  if (!['cash', 'card', 'iban'].includes(method)) {
+    throw new Error('Geçersiz tahsilat yöntemi: ' + method)
+  }
+  const ids = (paymentIds ?? []).filter(Boolean)
+  if (!ids.length) return 0
+  const now = new Date().toISOString()
+  let n = 0
+  for (const id of ids) {
+    // settled_at IS NULL: zaten tahsil edilmis bir borcu ikinci kez
+    // isaretlemek tarihini degistirip tutari baska bir gune kaydirirdi.
+    db.run(
+      `UPDATE payments SET settled_at = ?, settled_method = ?, is_synced = 0
+       WHERE id = ? AND payment_method = 'veresiye' AND settled_at IS NULL`,
+      [now, method, id]
+    )
+    n++
+  }
+  await persistDb()
+  return n
+}
+
+// Yanlislikla girilmis bir veresiye kaydini siler.
+//
+// Bu duz bir DELETE degil: ciro hesabi veresiye payini payments
+// tablosundan cikariyor (bkz. _revenueRows). Kayit oylece silinirse
+// cikarma da kalkar ve KASAYA HIC GIRMEMIS bir para ciroya eklenir.
+// Bu yuzden siparisin de duzeltilmesi gerekiyor:
+//
+//   * Siparisin tamami veresiyeydi (baska odeme yok) -> siparis IPTAL
+//     edilir. Boyle bir satis hic olmamis sayilir, urunler satilmamis
+//     kabul edilir ve Siparisler sayfasinda "Iptal" olarak iz kalir.
+//   * Siparis parcaliydi (nakit + veresiye gibi) -> yalnizca veresiye payi
+//     dusulur: tutar azaltilir, fark indirime yazilir. Boylece
+//     subtotal - indirim = tutar = gercekten alinan para esitligi korunur.
+//
+// Uzakta da varsa tombstone birakilir; senkron bir sonraki turda Supabase
+// tarafindan da siler.
+export async function deleteVeresiye(paymentId) {
+  requireDb()
+  const res = db.exec(
+    `SELECT id, order_id, amount, remote_id, settled_at
+     FROM payments WHERE id = ? AND payment_method = 'veresiye'`,
+    [paymentId]
+  )
+  if (!res.length || !res[0].values.length) {
+    return { ok: false, error: 'Veresiye kaydı bulunamadı' }
+  }
+  const [pid, orderId, amountRaw, remoteId] = res[0].values[0]
+  const amount = Number(amountRaw) || 0
+
+  // Junction satirlari (hangi kalemleri kapatiyordu) ve kaydin kendisi
+  db.run('DELETE FROM payment_items WHERE payment_id = ?', [pid])
+  db.run('DELETE FROM payments WHERE id = ?', [pid])
+  if (remoteId) {
+    db.run("INSERT INTO pending_deletes (entity_type, remote_id) VALUES ('payment', ?)", [remoteId])
+  }
+
+  // Siparisin akibeti
+  const kalan = db.exec('SELECT COALESCE(SUM(amount),0) FROM payments WHERE order_id = ?', [orderId])
+  const kalanOdeme = Number(kalan[0]?.values[0][0]) || 0
+
+  let outcome
+  if (kalanOdeme <= 0.01) {
+    // Tamami veresiyeydi -> iptal
+    db.run(
+      `UPDATE orders SET status = 'cancelled', veresiye_amount = NULL, is_synced = 0
+       WHERE id = ?`,
+      [orderId]
+    )
+    outcome = 'cancelled'
+  } else {
+    // Parcali -> yalnizca veresiye payini dus
+    db.run(
+      `UPDATE orders
+         SET total = ROUND(MAX(0, COALESCE(total,0) - ?), 2),
+             discount = ROUND(COALESCE(discount,0) + ?, 2),
+             veresiye_amount = NULL,
+             is_synced = 0
+       WHERE id = ?`,
+      [amount, amount, orderId]
+    )
+    outcome = 'reduced'
+  }
+
+  await persistDb()
+  return { ok: true, outcome, amount, orderId }
+}
+
 // Yanlışlıkla "ödendi" işaretlenen bir borcu geri açar.
 export async function unsettleVeresiye(paymentId) {
   requireDb()
