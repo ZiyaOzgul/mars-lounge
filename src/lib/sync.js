@@ -107,21 +107,56 @@ export async function syncToSupabase(log = null) {
     const tableMap = { product: 'products', category: 'categories', ingredient: 'ingredients', modifier: 'modifiers', variant: 'product_variants', payment: 'payments' }
     const table = tableMap[pd.entity_type]
     if (!table) { await clearPendingDelete(pd.id); continue }
-    const { error } = await supabase.from(table).delete().eq('id', pd.remote_id)
-    if (!error) {
+    // .select('id') ŞART: PostgREST, hiçbir satır eşleşmese bile DELETE'te
+    // hata döndürmez. Eskiden "hata yok" = "silindi" sayılıp tombstone
+    // temizleniyordu; satır sunucuda is_active=true olarak kalınca bir
+    // sonraki pull onu geri getiriyordu. Kullanıcı ürünü silinmiş görüyor,
+    // 60 saniye sonra geri geliyordu ("sildim, geri geldi").
+    //
+    // Sıfır satır dönmesinin sebebi RLS olabilir (oturum düşüp anon'a
+    // inmişse products_delete politikası authenticated istiyor), yanlış bir
+    // remote_id olabilir, ya da satır zaten silinmiş olabilir. İlk ikisinde
+    // tombstone KORUNMALI — pull filtresi kaydı gizli tutar ve bir sonraki
+    // tur tekrar dener. Sonuncusunda ise temizlenmeli, yoksa sonsuza kadar
+    // kuyrukta kalır. Bu yüzden 0 satırda varlık kontrolü yapıyoruz.
+    const { data: silinen, error } = await supabase
+      .from(table).delete().eq('id', pd.remote_id).select('id')
+
+    if (!error && silinen && silinen.length > 0) {
       await clearPendingDelete(pd.id)
       ok(`[Sync] ✓ Silindi: ${pd.entity_type} remote:${pd.remote_id}`)
+    } else if (!error) {
+      // Hata yok ama hiçbir satır silinmedi — gerçekten yok mu, yoksa
+      // izin mi verilmedi?
+      const { data: halaVar } = await supabase
+        .from(table).select('id').eq('id', pd.remote_id).maybeSingle()
+      if (!halaVar) {
+        await clearPendingDelete(pd.id)
+        inf(`[Sync] ℹ Zaten silinmiş: ${pd.entity_type} remote:${pd.remote_id}`)
+      } else {
+        err(
+          `[Sync] ✗ SİLİNEMEDİ (izin reddedildi olabilir) — kayıt sunucuda duruyor, ` +
+          `tekrar denenecek: ${pd.entity_type} remote:${pd.remote_id}`,
+          { message: 'DELETE hiçbir satır etkilemedi' }
+        )
+      }
     } else if (error.code === '23503' && pd.entity_type === 'product') {
       // Product is referenced by order_items — soft-delete instead of hard delete
-      const { error: softErr } = await supabase
+      const { data: pasif, error: softErr } = await supabase
         .from('products')
         .update({ is_active: false })
         .eq('id', pd.remote_id)
-      if (!softErr) {
+        .select('id')
+      if (!softErr && pasif && pasif.length > 0) {
         await clearPendingDelete(pd.id)
         ok(`[Sync] ✓ Ürün deaktive edildi (siparişlerde kullanıldığı için): remote:${pd.remote_id}`)
       } else {
-        err(`[Sync] ✗ Ürün deaktive edilemedi: remote:${pd.remote_id}`, softErr)
+        // Aynı tuzak UPDATE'te de var: 0 satır etkilense de hata gelmez.
+        // Tombstone korunuyor ki ürün geri gelmesin.
+        err(
+          `[Sync] ✗ Ürün deaktive edilemedi — tekrar denenecek: remote:${pd.remote_id}`,
+          softErr ?? { message: 'UPDATE hiçbir satır etkilemedi' }
+        )
       }
     } else if (error.code === '23503') {
       // Non-product entity is referenced by existing sales records — cannot delete
