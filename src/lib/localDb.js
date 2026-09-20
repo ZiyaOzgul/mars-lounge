@@ -2056,15 +2056,39 @@ function _dateClause(startIso, endIso) {
   return { clause: 'AND ' + parts.join(' AND '), params }
 }
 
+// Raporlarin en tepesindeki ciro karti. v1.5.0'da veresiye kurali veri
+// katmanina tasinirken BURASI ATLANMISTI: grafik ve odeme dagilimi
+// duzelmisti ama basliktaki buyuk rakam hala veresiyeyi satis aninda
+// sayiyordu. Kullanicinin gordugu ilk sayi oldugu icin "veresiye hala
+// ciroya dokunuyor" izlenimi buradan geliyordu.
 export function getReportKpis(startIso, endIso) {
   requireDb()
-  const { clause, params } = _dateClause(startIso, endIso)
-  const res = db.exec(
-    `SELECT COALESCE(SUM(total),0), COUNT(*), COALESCE(AVG(total),0)
-     FROM orders WHERE status='completed' ${clause}`,
-    params
+  const w = _revenueWhere(startIso, endIso)
+
+  // Siparis sayisi degismiyor: satis gerceklesti, yalnizca parasinin ne
+  // zaman kasaya girdigi farkli.
+  const cntRes = db.exec(
+    `SELECT COUNT(*) FROM orders o WHERE o.status='completed'${w.sales}`,
+    w.salesParams
   )
-  const [revenue, orderCount, avgOrder] = res[0]?.values[0] ?? [0, 0, 0]
+  const orderCount = cntRes[0]?.values[0][0] ?? 0
+
+  const res = db.exec(
+    `SELECT COALESCE(SUM(tutar),0) FROM (
+       SELECT COALESCE(o.total,0) - COALESCE(v.tutar,0) AS tutar
+       FROM orders o
+       LEFT JOIN (${VERESIYE_PER_ORDER}) v ON v.order_id = o.id
+       WHERE o.status='completed'${w.sales}
+       UNION ALL
+       SELECT p.amount FROM payments p WHERE ${w.settled}
+     )`,
+    w.params
+  )
+  const revenue = res[0]?.values[0][0] ?? 0
+
+  // Ortalama sepet ciroyla tutarli olsun — ucu ayri sayi gosterip
+  // kullaniciyi "bunlar nasil toplanmiyor" sorusuyla bas basa birakmayalim.
+  const avgOrder = orderCount > 0 ? revenue / orderCount : 0
   return { revenue, orderCount, avgOrder }
 }
 
@@ -2151,6 +2175,37 @@ function _revenueRows(startIso, endIso) {
 // Dönemde tahsil edilen veresiyenin yöntem bazında dökümü. Tahsilat
 // yapıldığında para o yöntemle kasaya girer, o yüzden ödeme dağılımında
 // nakit/kart/IBAN kovalarına eklenmesi gerekiyor.
+// Ciro sorgulari iki kaynagi birlestiriyor ve ikisi FARKLI tarih kolonuna
+// gore filtreleniyor: satislar o.closed_at, veresiye tahsilatlari
+// p.settled_at. _dateClause tek bir kolon adi uretti§i icin burada elle
+// kuruyoruz. Donen params sirasi SQL'deki sira ile ayni olmak zorunda.
+function _revenueWhere(startIso, endIso, salesAlias = 'o', payAlias = 'p') {
+  const params = []
+  const sales = []
+  if (startIso) { sales.push(`${salesAlias}.closed_at >= ?`) }
+  if (endIso)   { sales.push(`${salesAlias}.closed_at < ?`) }
+  if (startIso) params.push(startIso)
+  if (endIso)   params.push(endIso)
+
+  const settled = [`${payAlias}.payment_method = 'veresiye'`, `${payAlias}.settled_at IS NOT NULL`]
+  if (startIso) { settled.push(`${payAlias}.settled_at >= ?`); params.push(startIso) }
+  if (endIso)   { settled.push(`${payAlias}.settled_at < ?`);  params.push(endIso) }
+
+  // salesParams: yalnizca satis kosulunun parametreleri. params dizisinin
+  // basindaki ayni degerler — yalnizca satis tarafini sorgulayanlar (orn.
+  // siparis sayisi) elle dilimlemek zorunda kalmasin.
+  const salesParams = []
+  if (startIso) salesParams.push(startIso)
+  if (endIso)   salesParams.push(endIso)
+
+  return {
+    sales: sales.length ? ' AND ' + sales.join(' AND ') : '',
+    settled: settled.join(' AND '),
+    params,
+    salesParams,
+  }
+}
+
 export function getSettledVeresiyeByMethod(startIso, endIso) {
   requireDb()
   const where = ["payment_method = 'veresiye'", 'settled_at IS NOT NULL']
@@ -2489,14 +2544,24 @@ export function getPaymentMethodDetail(startIso, endIso) {
   }
 }
 
+// Masa bazli ciro da ayni kurala uyuyor, yoksa basliktaki toplam ile alt
+// dokum birbirini tutmaz. Tahsil edilen veresiye, borcun dogdugu masaya
+// yaziliyor — sonucta o masanin satisiydi.
 export function getTableRevenue(startIso, endIso) {
   requireDb()
-  const { clause, params } = _dateClause(startIso, endIso)
+  const w = _revenueWhere(startIso, endIso)
   const res = db.exec(
-    `SELECT table_name, COALESCE(SUM(total),0) as rev
-     FROM orders WHERE status='completed' AND table_name != '' ${clause}
-     GROUP BY table_name ORDER BY rev DESC LIMIT 5`,
-    params
+    `SELECT ad, COALESCE(SUM(tutar),0) as rev FROM (
+       SELECT o.table_name AS ad, COALESCE(o.total,0) - COALESCE(v.tutar,0) AS tutar
+       FROM orders o
+       LEFT JOIN (${VERESIYE_PER_ORDER}) v ON v.order_id = o.id
+       WHERE o.status='completed' AND o.table_name != ''${w.sales}
+       UNION ALL
+       SELECT o.table_name AS ad, p.amount AS tutar
+       FROM payments p JOIN orders o ON o.id = p.order_id
+       WHERE ${w.settled} AND o.table_name != ''
+     ) GROUP BY ad ORDER BY rev DESC LIMIT 5`,
+    w.params
   )
   if (!res.length) return []
   return res[0].values.map(([name, value]) => ({ name, value }))
@@ -2579,17 +2644,27 @@ export function getProductTableBreakdown(productName, startIso, endIso) {
 
 // ── Staff performance queries ─────────────────────────────────────
 
+// Personel cirosu da ayni kurala uyuyor. Siparis sayisi yalnizca gercek
+// satislardan geliyor (tahsilat satirlari sayiya eklenmiyor), ciro ise
+// satis + o donemde tahsil edilen veresiye.
 export function getStaffPerformance(startIso, endIso) {
   requireDb()
-  const { clause, params } = _dateClause(startIso, endIso)
+  const w = _revenueWhere(startIso, endIso)
   const res = db.exec(
-    `SELECT waiter_name, COUNT(*) as order_count, COALESCE(SUM(total), 0) as revenue
-     FROM orders
-     WHERE status = 'completed'
-       AND waiter_name IS NOT NULL AND waiter_name != '' ${clause}
-     GROUP BY waiter_name
-     ORDER BY revenue DESC`,
-    params
+    `SELECT ad, SUM(adet) as order_count, COALESCE(SUM(tutar),0) as revenue FROM (
+       SELECT o.waiter_name AS ad, 1 AS adet,
+              COALESCE(o.total,0) - COALESCE(v.tutar,0) AS tutar
+       FROM orders o
+       LEFT JOIN (${VERESIYE_PER_ORDER}) v ON v.order_id = o.id
+       WHERE o.status='completed'
+         AND o.waiter_name IS NOT NULL AND o.waiter_name != ''${w.sales}
+       UNION ALL
+       SELECT o.waiter_name AS ad, 0 AS adet, p.amount AS tutar
+       FROM payments p JOIN orders o ON o.id = p.order_id
+       WHERE ${w.settled}
+         AND o.waiter_name IS NOT NULL AND o.waiter_name != ''
+     ) GROUP BY ad ORDER BY revenue DESC`,
+    w.params
   )
   if (!res.length) return []
   return res[0].values.map(([name, orderCount, revenue]) => ({ name, orderCount, revenue }))
