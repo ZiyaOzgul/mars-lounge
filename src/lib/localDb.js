@@ -543,6 +543,17 @@ export async function initDb() {
       remote_id  TEXT
     )`,
     `CREATE INDEX IF NOT EXISTS idx_day_closures_closed_at ON day_closures(closed_at DESC)`,
+    // Bir siparis grubuna verilen kisi adi ("Ziya", "Ali"). Masaya verilen
+    // ada (table_labels) benzer ama masanin DEGIL, o masadaki tek bir
+    // siparisin adi — ayni masada oturan iki kisi ayri ayri takip
+    // edilebilsin, biri kalkip baska masaya gecerse adi ve urunleri
+    // birlikte tasinsin diye.
+    //
+    // SADECE YEREL: Supabase'in orders tablosunda boyle bir kolon yok ve
+    // sema DEGISTIRILMIYOR. Push yalnizca sabit bir kolon listesi
+    // gonderdigi icin (bkz. sync.js orderPayload) bu kolon disarı cikmaz;
+    // QR menuyu ve raporlari etkilemez.
+    `ALTER TABLE orders ADD COLUMN guest_label TEXT`,
     // Offline login fallback: PBKDF2 salt+hash per email, saved on every
     // successful online login so the same account can log in with no
     // internet on this device. Never stores the plaintext password.
@@ -3093,7 +3104,7 @@ export function getOrderItemRemoteIds(itemIds) {
 // kaydedilmiyordu; sipariş kapanana kadar `discount = 0` kalıyordu. Masa 4
 // gibi hiç kapanmayan bir sipariş bu yüzden "indirimi olmayan ama eksik
 // ödenmiş" görünüyordu ve ne olduğu veriden anlaşılamıyordu.
-export async function ensurePersistedActiveOrder({ tableId, tableName, waiterName = null, groupLocalId, supabaseOrderId = null, items = [], total = 0, discount = 0 }) {
+export async function ensurePersistedActiveOrder({ tableId, tableName, waiterName = null, groupLocalId, supabaseOrderId = null, items = [], total = 0, discount = 0, guestLabel = null }) {
   requireDb()
   let orderId = null
   let remoteId = supabaseOrderId != null ? String(supabaseOrderId) : null
@@ -3115,6 +3126,10 @@ export async function ensurePersistedActiveOrder({ tableId, tableName, waiterNam
        WHERE id = ?`,
       [net, disc, Math.round((net + disc) * 100) / 100, tableId, tableName || '',
        net, disc, tableId, tableName || '', orderId])
+    // Kisi adi AYRI yaziliyor: yerel bir alan, degismesi senkron kuyruguna
+    // is dusurmemeli. Yukaridaki is_synced CASE'ine karistirilsaydi her ad
+    // duzenlemesi gereksiz bir Supabase push'u tetiklerdi.
+    db.run('UPDATE orders SET guest_label = ? WHERE id = ?', [guestLabel || null, orderId])
   } else {
     orderId = newLocalId()
     const net  = Number(total) || 0
@@ -3122,11 +3137,12 @@ export async function ensurePersistedActiveOrder({ tableId, tableName, waiterNam
     db.run(
       `INSERT INTO orders
          (id, local_id, table_id, table_name, status, payment_method, subtotal, discount, total,
-          is_synced, remote_id, created_at, closed_at, waiter_name)
-       VALUES (?, ?, ?, ?, 'active', '', ?, ?, ?, ?, ?, ?, '', ?)`,
+          is_synced, remote_id, created_at, closed_at, waiter_name, guest_label)
+       VALUES (?, ?, ?, ?, 'active', '', ?, ?, ?, ?, ?, ?, '', ?, ?)`,
       [orderId, String(groupLocalId), tableId, tableName || '',
        Math.round((net + disc) * 100) / 100, disc, net,
-       remoteId ? 1 : 0, remoteId, new Date().toISOString(), waiterName || null]
+       remoteId ? 1 : 0, remoteId, new Date().toISOString(), waiterName || null,
+       guestLabel || null]
     )
   }
 
@@ -3518,17 +3534,18 @@ export async function deleteActiveOrderCascade(orderId) {
 export function getAllActiveOrders() {
   requireDb()
   const res = db.exec(
-    `SELECT id, local_id, table_id, table_name, total, remote_id, created_at, waiter_name
+    `SELECT id, local_id, table_id, table_name, total, remote_id, created_at, waiter_name, guest_label
      FROM orders WHERE status = 'active' ORDER BY created_at, id`
   )
   if (!res.length) return []
-  return res[0].values.map(([id, local_id, table_id, table_name, total, remote_id, created_at, waiter_name]) => {
+  return res[0].values.map(([id, local_id, table_id, table_name, total, remote_id, created_at, waiter_name, guest_label]) => {
     const rows = getOrderItemRows(id)
     const modsMap = getModifiersForOrderItems(rows.map(r => r.id))
     const paidSet = getPaidItemIds(id)
     return {
       id, local_id, table_id, table_name, total,
       remote_id: remote_id ?? null, created_at, waiter_name: waiter_name || null,
+      guest_label: guest_label || null,
       totalPaid: getOrderTotalPaid(id),
       items: rows.map(r => ({ ...r, modifiers: modsMap[r.id] || [], paid: paidSet.has(r.id) })),
     }
@@ -3607,6 +3624,17 @@ export async function setOrderStatus(orderId, status, extra = {}) {
       [status, closedAt || '', orderId]
     )
   }
+  await persistDb()
+}
+
+// Siparis grubuna verilen kisi adini hemen diske yazar. Debounce'li
+// kalicilastirici zaten ayni degeri yaziyor; bu, kasiyer adi yazdiktan
+// hemen sonra uygulama kapanirsa adin kaybolmamasi icin. is_synced'e
+// dokunmuyor — yerel bir alan, senkron kuyruguna is dusurmez.
+export async function setOrderGuestLabel(orderId, label) {
+  requireDb()
+  const clean = String(label ?? '').trim().slice(0, 24)
+  db.run('UPDATE orders SET guest_label = ? WHERE id = ?', [clean || null, orderId])
   await persistDb()
 }
 

@@ -157,6 +157,10 @@ function hydrateGroupFromActiveOrder(o) {
     supabaseOrderId: isRemote ? Number(o.remote_id) : null,
     persistedOrderId: o.id,
     paidAmount: o.totalPaid,
+    // Gruba verilen kisi adi ("Ziya"). Opsiyonel; yoksa label (Sipariş N)
+    // gorunmeye devam eder. Yeniden kurulumda kaybolmasin diye diskten
+    // okunuyor — bkz. orders.guest_label (YEREL kolon).
+    guestLabel: o.guest_label || null,
     items,
   }
   const tableState = {
@@ -784,6 +788,7 @@ export function AppProvider({ children }) {
             supabaseOrderId: g.supabaseOrderId ?? null,
             items: g.items,
             total: gTotal,
+            guestLabel: g.guestLabel ?? null,
           })
         }
       }

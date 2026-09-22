@@ -86,7 +86,7 @@ function OrderPanel({
   table, tables = [],
   onClose, onCloseTable, onAddItem, onUpdateNote, onRemoveItem,
   onPayOrder, onNewGroup, onMoveWholeTable, onMoveItemsToTable, onSetDiscount, onCancelTable,
-  onSetGuestLabel,
+  onSetGuestLabel, onSetGroupLabel, onMoveGroupToTable,
 }) {
   const { products, categories, productVariants, currentUser } = useApp()
   const canDiscount = hasPerm(currentUser, 'apply_discount')
@@ -116,6 +116,22 @@ function OrderPanel({
     setLabelEditing(false)
     const next = labelDraft.trim()
     if (next !== (table.guestLabel ?? '')) onSetGuestLabel?.(table.id, next)
+  }
+
+  // Siparis grubuna verilen kisi adi ("Ziya"). Masa adiyla ayni kalibi
+  // kullaniyor ama hedefi farkli: masanin degil, o masadaki TEK bir
+  // siparisin sahibi. groupLabelEditing = duzenlenen grubun localId'si.
+  const [groupLabelEditing, setGroupLabelEditing] = useState(null)
+  const [groupLabelDraft,   setGroupLabelDraft]   = useState('')
+
+  const openGroupLabelEditor = (order) => {
+    setGroupLabelDraft(order.guestLabel ?? '')
+    setGroupLabelEditing(order.localId)
+  }
+  const commitGroupLabel = (order) => {
+    setGroupLabelEditing(null)
+    const next = groupLabelDraft.trim()
+    if (next !== (order.guestLabel ?? '')) onSetGroupLabel?.(table.id, order.localId, next)
   }
 
   // Transfer flow
@@ -273,8 +289,21 @@ function OrderPanel({
     })
   }
 
+  // Bir KISIYI (siparis grubunu) urunleriyle birlikte tasir. Hedef masa
+  // dolu da bos da olabilir — kisi hedefte kendi adiyla ayri bir grup
+  // olarak durur, mevcut siparisin icine karismaz.
+  const openMoveGroupPicker = (order) => {
+    setTablePicker({ mode: 'all', groupLocalId: order.localId, groupName: order.guestLabel || order.label })
+  }
+
   const handleTablePicked = (target) => {
     if (!tablePicker) return
+    if (tablePicker.groupLocalId) {
+      onMoveGroupToTable?.(table.id, tablePicker.groupLocalId, target.id)
+      setTablePicker(null)
+      onClose()
+      return
+    }
     if (tablePicker.mode === 'emptyOnly') {
       onMoveWholeTable?.(table.id, target.id)
       setTablePicker(null)
@@ -486,15 +515,47 @@ function OrderPanel({
               <div className="om-items">
                 {orders.map(order => {
                   const grpSubtotal = order.items.reduce((s, i) => s + i.qty * (i.unitPrice + modifiersSum(i.modifiers)), 0)
-                  const showHeader = orders.length > 1
+                  // Baslik: birden fazla grup varsa ya da gruba kisi adi
+                  // verilmisse (tek kisi de adiyla gorunsun diye).
+                  const showHeader = orders.length > 1 || !!order.guestLabel || groupLabelEditing === order.localId
                   const isActive = table.activeGroupId === order.localId
                   return (
                     <div key={order.localId} className={`${showHeader ? 'om-order-group' : ''} ${isActive ? 'om-order-group--active' : ''}`}>
                       {showHeader && (
                         <div className="om-order-group__header">
-                          <span className="om-order-group__label">{order.label}</span>
+                          {groupLabelEditing === order.localId ? (
+                            <input
+                              className="om-order-group__label-input"
+                              autoFocus
+                              maxLength={24}
+                              placeholder="Kişi adı"
+                              value={groupLabelDraft}
+                              onChange={e => setGroupLabelDraft(e.target.value)}
+                              onBlur={() => commitGroupLabel(order)}
+                              onKeyDown={e => {
+                                if (e.key === 'Enter') commitGroupLabel(order)
+                                if (e.key === 'Escape') setGroupLabelEditing(null)
+                              }}
+                            />
+                          ) : (
+                            <button
+                              className="om-order-group__label"
+                              onClick={() => openGroupLabelEditor(order)}
+                              title={order.guestLabel ? 'Adı düzenle' : 'Bu siparişe kişi adı ver'}
+                            >
+                              {order.guestLabel || order.label}
+                              {order.guestLabel && (
+                                <span className="om-order-group__label-sub">{order.label}</span>
+                              )}
+                            </button>
+                          )}
                           {isActive && <span className="om-order-group__active-dot" />}
                           <span className="om-order-group__subtotal">₺{grpSubtotal.toLocaleString('tr-TR', { minimumFractionDigits: 2 })}</span>
+                          <button
+                            className="om-order-group__move-btn"
+                            title="Bu kişiyi ürünleriyle birlikte başka masaya taşı"
+                            onClick={() => openMoveGroupPicker(order)}
+                          >Taşı</button>
                           {canClose && <button
                             className="om-order-group__pay-btn"
                             onClick={() => onPayOrder(table.id, order.localId)}
@@ -644,6 +705,16 @@ function OrderPanel({
                   </div>
                 )}
 
+                {/* Tek siparis grubu varsa ve adi yoksa grup basligi hic
+                    gorunmuyor — adlandirmaya girisi buradan veriyoruz. */}
+                {isOccupied && orders.length === 1 && !orders[0].guestLabel && (
+                  <button
+                    className="om-new-group-btn"
+                    onClick={() => openGroupLabelEditor(orders[0])}
+                  >
+                    + Kişi Adı Ver
+                  </button>
+                )}
                 <button
                   className="om-new-group-btn"
                   onClick={() => onNewGroup(table.id)}
@@ -788,11 +859,17 @@ function OrderPanel({
         tables={tables}
         mode={tablePicker?.mode || 'emptyOnly'}
         excludeTableId={table.id}
-        title={tablePicker?.mode === 'emptyOnly' ? 'Masayı Taşı' : 'Hedef Masa'}
+        title={
+          tablePicker?.groupLocalId ? 'Kişiyi Taşı'
+          : tablePicker?.mode === 'emptyOnly' ? 'Masayı Taşı'
+          : 'Hedef Masa'
+        }
         subtitle={
-          tablePicker?.mode === 'emptyOnly'
-            ? 'Boş bir masa seçin'
-            : `${tablePicker?.itemIds?.length || 0} ürün → Dolu masa seçin`
+          tablePicker?.groupLocalId
+            ? `${tablePicker.groupName} → hangi masaya geçiyor?`
+            : tablePicker?.mode === 'emptyOnly'
+              ? 'Boş bir masa seçin'
+              : `${tablePicker?.itemIds?.length || 0} ürün → Dolu masa seçin`
         }
         onSelect={handleTablePicked}
         onClose={() => setTablePicker(null)}

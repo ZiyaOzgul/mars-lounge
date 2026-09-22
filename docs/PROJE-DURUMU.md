@@ -252,6 +252,72 @@ yapması gerekmiyor.
 Doğrulamanın tek yolu kurulu sürümü teyit etmek (Ayarlar'daki sürüm bilgisi
 ya da userData'da beklenen dosyaların varlığı).
 
+### Her ürün ayrı sipariş grubu açıyordu (22 Eylül 2026)
+
+Kişi bazlı adisyon özelliğini denerken çıktı ve **daha büyük bir hataydı**:
+masaya arka arkaya eklenen her ürün AYRI bir sipariş grubu (ve Supabase'de
+ayrı bir `orders` satırı) oluşturuyordu.
+
+Kök neden — `Tables.jsx` `handleAddItem`, tek kural:
+
+    const manualIdx = orders.findIndex(o => o.supabaseOrderId === null)
+    if (manualIdx === -1) { /* YENİ GRUP AÇ */ }
+
+Kuralın niyeti "QR siparişinin içine elle ürün düşürme" idi. Ama bizim kendi
+grubumuz da ~1 saniyelik debounce'tan sonra Supabase'e gidip bir `remote_id`
+kazanıyor; o andan itibaren kural onu da QR sanıp her yeni ürün için yeni
+grup açıyordu. Yani ayıraç aslında "uzakta var mı" idi, "kim oluşturdu" değil.
+
+Ölçüm (canlı dev oturumu, aralarında 1–4 sn ile 4 ürün):
+
+    Sipariş 1 ₺140 · Sipariş 2 ₺140 · Sipariş 3 ₺140 · Sipariş 4 ₺100
+    → Supabase: orders 2136, 2137, 2138, 2141 (tek masa, dört adisyon)
+
+**Müşterinin kendi verisinde de aynısı var** — tek tıkla eklenen adetler tek
+grupta, ayrı tıklar ayrı grupta:
+
+    masa 13 → orders 2165 (19:46:15), 2166 (19:46:20), 2167 (19:46:27)
+    masa 6  → orders 2170, 2171, 2173, 2174, 2175 (hepsi 1 kalem)
+    masa 10 → 2176 (3× OREOLU MILKSHAKE, aynı ms) + 2177 (2× MARS, 4 sn sonra)
+
+Bu, "Masa 4'te 7 ayrı ödenmiş-ama-kapanmamış sipariş" ve "25 tamamlanmış
+siparişin payments satırı yok" gibi eski bulguların da muhtemel kaynağı:
+tek bir masa oturumu onlarca `orders` satırına bölünüyor.
+
+Düzeltme — hedef grup seçme sırası:
+  1. açıkça verilen `targetGroupId`
+  2. `activeGroupId` (en son dokunulan grup) — artık ürün eklerken de yazılıyor
+  3. henüz gönderilmemiş ilk yerel grup (eski kural)
+  4. listedeki son grup — yenisini açmak yerine
+Ayırmak artık bilinçli bir hareket: "+ Yeni Sipariş" ya da kişi adı vermek.
+
+### Kişi bazlı adisyon: masaya oturanı adıyla takip etme (22 Eylül 2026)
+
+Masaya verilen ad (`table_labels`, v1.4.0) masanın TAMAMINI adlandırıyordu.
+Buna ek olarak artık masadaki her sipariş grubu bir kişiye ad verilerek
+takip edilebiliyor ve o kişi, ürünleriyle birlikte başka bir masaya
+taşınabiliyor.
+
+- `orders.guest_label` — **YEREL kolon** (migration). Supabase şemasına
+  dokunulmadı; push sabit bir kolon listesi gönderdiği için dışarı çıkmaz,
+  QR menüyü ve raporları etkilemez. Diske yazıldığı için kapat-aç sonrası ad
+  kaybolmuyor.
+- Grup `label`'ı ("Sipariş 2") sıra numarası olarak duruyor; `guestLabel`
+  onun yerine değil yanında. Ad silinince grup yine numarasıyla görünür.
+- Taşıma bir SİLME DEĞİL: var olan siparişin `table_id`'si güncelleniyor.
+  `local_id`/`remote_id` sabit kalıyor, `pending_deletes`'e hiçbir şey
+  düşmüyor — bu yüzden "sildim, geri geldi" sınıfı sorunlar bu yolda
+  oluşamaz (push tarafı zaten `remote_id` ile UPDATE ediyor, DELETE değil).
+- Hedef masa dolu olabilir: kişi orada kendi adıyla ayrı bir adisyon olarak
+  durur, mevcut siparişin içine karışmaz.
+
+Doğrulama — müşterinin gerçek veritabanı kopyası üzerinde 22 iddia
+(`guest_label` eski veriye zarar vermiyor, taşımada satır kaybı yok, ciro ve
+ödeme sayısı değişmiyor) ve canlı arayüzde uçtan uca senaryo:
+Masa-1'de Ali (3 ürün ₺410) + Ziya (2 ürün ₺250) → Ziya Masa-6'ya taşındı →
+Masa-1: Ali, 3 ürün ₺410 · Masa-6: Ziya, 4 ürün ₺420 (masanın kendi ₺170'i
+korunarak).
+
 ## Canlı veri durumu (13 Eylül 2026)
 
 - **Masa 4** — ✅ **ÇÖZÜLDÜ (14 Eylül 2026).** 20 Ağustos'tan kalma 6 + 12 Eylül'den

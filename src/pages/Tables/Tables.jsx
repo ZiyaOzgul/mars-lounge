@@ -11,6 +11,7 @@ import {
   getStaffUidByName,
   setTableLabel as persistTableLabel,
   clearTableLabel as persistClearTableLabel,
+  setOrderGuestLabel as persistOrderGuestLabel,
 } from '../../lib/localDb.js'
 import { hoursSinceLastClosure } from '../../lib/businessDay.js'
 import { PAYMENT_TOLERANCE } from '../../lib/money.js'
@@ -370,6 +371,90 @@ function Tables() {
       console.warn('[Tables] masa adı kaydedilemedi', e))
   }, [])
 
+  // Bir siparis grubuna kisi adi verir ("Ziya"). Masa adindan farki: masa
+  // adi masanin tamaminin adi, bu ise o masadaki TEK bir siparisin sahibi.
+  // Ayni masada oturan iki kisi ayri gruplarda takip edilsin, biri kalkinca
+  // adi ve urunleri birlikte tasinabilsin diye. Tamamen opsiyonel — ad
+  // verilmezse grup eskisi gibi "Sipariş 1/2" olarak gorunur.
+  const handleSetGroupLabel = useCallback((tableId, groupLocalId, label) => {
+    const clean = String(label ?? '').trim().slice(0, 24)
+    let persistedId = null
+    setRuntimeStates(prev => {
+      const existing = prev[tableId]
+      if (!existing) return prev
+      const orders = existing.orders ?? []
+      const idx = orders.findIndex(o => o.localId === groupLocalId)
+      if (idx === -1) return prev
+      persistedId = orders[idx].persistedOrderId ?? null
+      const newOrders = orders.map((o, i) =>
+        i === idx ? { ...o, guestLabel: clean || null } : o)
+      return { ...prev, [tableId]: { ...existing, orders: newOrders } }
+    })
+    // Grup diske yazilmissa adi hemen yaz; yazilmamissa (henuz urun yok)
+    // debounce'li kalicilastirici ilk urunde zaten birlikte yazacak.
+    if (persistedId) {
+      persistOrderGuestLabel(persistedId, clean).catch(e =>
+        console.warn('[Tables] sipariş adı kaydedilemedi', e))
+    }
+  }, [setRuntimeStates])
+
+  // Bir KISIYI (siparis grubunu) urunleriyle birlikte baska masaya tasir.
+  // "Ürün Taşı"dan farki: grup kimligini koruyor — hedef masada mevcut bir
+  // grubun icine karismiyor, kendi adiyla ayri bir grup olarak duruyor.
+  //
+  // Senkron acisindan guvenli: bu bir SILME degil, var olan siparis satirinin
+  // table_id'sinin GUNCELLENMESI. local_id/remote_id ayni kaliyor, tombstone
+  // devreye girmiyor — "sildim, geri geldi" sinifindaki sorunlar bu yolda
+  // olusamaz (bkz. sync.js — orders push'u remote_id ile UPDATE ediyor).
+  const handleMoveGroupToTable = useCallback((fromTableId, groupLocalId, toTableId) => {
+    if (fromTableId === toTableId) return
+    const fromState = runtimeStates[fromTableId]
+    const group = (fromState?.orders ?? []).find(o => o.localId === groupLocalId)
+    if (!group) return
+
+    const toName = tableDefs.find(t => t.id === toTableId)?.name ?? ''
+    if (group.persistedOrderId) {
+      moveOrderToTable(group.persistedOrderId, toTableId, toName)
+        .catch(e => console.warn('[Tables] kişi taşıma — sipariş taşınamadı', e))
+    }
+
+    setRuntimeStates(prev => {
+      const from = prev[fromTableId]
+      if (!from) return prev
+      const fromOrders = from.orders ?? []
+      const idx = fromOrders.findIndex(o => o.localId === groupLocalId)
+      if (idx === -1) return prev
+      const moving = fromOrders[idx]
+      const remaining = fromOrders.filter((_, i) => i !== idx)
+
+      const next = { ...prev }
+      // Kaynak masada baska grup kalmadiysa masa bosalir — masaya verilmis
+      // gecici ad da "doluydu → bosaldi" gecis etkisiyle temizlenir.
+      if (remaining.length === 0) delete next[fromTableId]
+      else next[fromTableId] = { ...from, orders: remaining }
+
+      const to = prev[toTableId]
+      const base = to ?? {
+        status: 'occupied',
+        type: 'normal',
+        openTime: getLiveTime(),
+        openedAt: new Date().toISOString(),
+        openMinutes: 0,
+        waiter: from.waiter ?? '—',
+        orders: [],
+      }
+      const toOrders = base.orders ?? []
+      next[toTableId] = {
+        ...base,
+        status: 'occupied',
+        // label sira numarasi; guestLabel (kisi adi) oldugu gibi tasiniyor.
+        orders: [...toOrders, { ...moving, label: `Sipariş ${toOrders.length + 1}` }],
+      }
+      return next
+    })
+    setSelectedTableId(null)
+  }, [runtimeStates, tableDefs, setRuntimeStates])
+
   // Merge tableDefs with runtime states — new tables from Settings appear as empty
   const displayTables = tableDefs.map(def => {
     const state = runtimeStates[def.id] ?? { status: 'empty' }
@@ -381,7 +466,10 @@ function Tables() {
     const idleMinutes = state.status === 'occupied'
       ? computeIdleMinutes({ items: orderItems, openedAt: state.openedAt }, nowTs)
       : 0
-    return { ...def, ...state, orderItems, openMinutes, idleMinutes, guestLabel: tableLabels[String(def.id)] ?? null }
+    // Masada adi verilmis kisiler — kart uzerinde gorunsun ki kasiyer
+    // masayi acmadan kimin oturdugunu gorebilsin.
+    const guestNames = (state.orders ?? []).map(o => o.guestLabel).filter(Boolean)
+    return { ...def, ...state, orderItems, openMinutes, idleMinutes, guestNames, guestLabel: tableLabels[String(def.id)] ?? null }
   })
 
   const visibleTables = tableFilter === 'open'
@@ -427,6 +515,7 @@ function Tables() {
 
   const handleAddItem = (tableId, product, targetGroupId = null, modifiers = []) => {
     const newItem = makeLineItem(product, modifiers)
+    const firstGroupId = crypto.randomUUID()
     setRuntimeStates(prev => {
       const existing = prev[tableId]
       if (!existing) {
@@ -439,7 +528,8 @@ function Tables() {
             openedAt: new Date().toISOString(),
             openMinutes: 0,
             waiter: '—',
-            orders: [{ localId: crypto.randomUUID(), label: 'Sipariş 1', supabaseOrderId: null, items: [newItem] }],
+            orders: [{ localId: firstGroupId, label: 'Sipariş 1', supabaseOrderId: null, items: [newItem] }],
+            activeGroupId: firstGroupId,
           },
         }
       }
@@ -448,19 +538,38 @@ function Tables() {
         const idx = orders.findIndex(o => o.localId === targetGroupId)
         if (idx !== -1) {
           const newOrders = orders.map((o, i) => i === idx ? { ...o, items: [...o.items, newItem] } : o)
-          return { ...prev, [tableId]: { ...existing, status: 'occupied', orders: newOrders } }
+          return { ...prev, [tableId]: { ...existing, status: 'occupied', orders: newOrders, activeGroupId: targetGroupId } }
         }
       }
-      // Find first manual group (supabaseOrderId === null), or create new one
-      const manualIdx = orders.findIndex(o => o.supabaseOrderId === null)
-      let newOrders
-      if (manualIdx === -1) {
+
+      // FIX — urun eklenecek grubu secme sirasi.
+      //
+      // Eskiden tek kural "supabaseOrderId === null olan ilk grup" idi; niyeti
+      // QR siparisinin icine elle urun dusurmemekti. Ama bizim kendi
+      // grubumuz da ~1 saniye sonra Supabase'e gidip bir remote_id
+      // kazaniyor — o andan sonra kural onu da "QR" sanip HER YENI URUN ICIN
+      // YENI BIR GRUP aciyordu. Canli olcum (4 urun, aralarinda 1-3 sn):
+      //   Sipariş 1 ₺140 · Sipariş 2 ₺140 · Sipariş 3 ₺140 · Sipariş 4 ₺100
+      // yani tek masa Supabase'de 4 ayri siparis (2136/2137/2138/2141)
+      // olarak duruyordu. Kisi bazli takip bu haliyle imkansiz — her urun
+      // ayri "kisi" gibi gorunuyor.
+      //
+      // Yeni sira: 1) en son dokunulan grup, 2) henuz gonderilmemis ilk
+      // yerel grup, 3) listedeki son grup. Yani urunler kasiyerin uzerinde
+      // calistigi grubun altina birikiyor; ayirmak istedigi anda
+      // "+ Yeni Sipariş" (ya da kisi adi vermek) bilincli bir hareket.
+      let idx = existing.activeGroupId
+        ? orders.findIndex(o => o.localId === existing.activeGroupId)
+        : -1
+      if (idx === -1) idx = orders.findIndex(o => o.supabaseOrderId === null)
+      if (idx === -1 && orders.length > 0) idx = orders.length - 1
+
+      if (idx === -1) {
         const newGroup = { localId: crypto.randomUUID(), label: `Sipariş ${orders.length + 1}`, supabaseOrderId: null, items: [newItem] }
-        newOrders = [...orders, newGroup]
-      } else {
-        newOrders = orders.map((o, idx) => idx === manualIdx ? { ...o, items: [...o.items, newItem] } : o)
+        return { ...prev, [tableId]: { ...existing, status: 'occupied', orders: [...orders, newGroup], activeGroupId: newGroup.localId } }
       }
-      return { ...prev, [tableId]: { ...existing, status: 'occupied', orders: newOrders } }
+      const newOrders = orders.map((o, i) => i === idx ? { ...o, items: [...o.items, newItem] } : o)
+      return { ...prev, [tableId]: { ...existing, status: 'occupied', orders: newOrders, activeGroupId: orders[idx].localId } }
     })
   }
 
@@ -1353,6 +1462,8 @@ function Tables() {
           onSetDiscount={handleSetDiscount}
           onCancelTable={requestCancelTable}
           onSetGuestLabel={handleSetGuestLabel}
+          onSetGroupLabel={handleSetGroupLabel}
+          onMoveGroupToTable={handleMoveGroupToTable}
           onPayOrder={(tableId, subOrderLocalId) => {
             const tbl = displayTables.find(t => t.id === tableId)
             const order = (runtimeStates[tableId]?.orders ?? []).find(o => o.localId === subOrderLocalId)

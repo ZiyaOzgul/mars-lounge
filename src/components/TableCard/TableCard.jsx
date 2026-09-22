@@ -53,7 +53,7 @@ function Watermark({ number }) {
 }
 
 function TableCard({ table, isSelected, onClick }) {
-  const { name, status, type, openMinutes, itemCount, total, idleMinutes, guestLabel } = table
+  const { name, status, type, openMinutes, itemCount, total, idleMinutes, guestLabel, guestNames = [] } = table
   const { prefix, number } = splitName(name)
 
   if (status === 'empty') {
@@ -141,6 +141,16 @@ function TableCard({ table, isSelected, onClick }) {
           </>
         )}
       </div>
+
+      {/* Masada adi verilmis kisiler. Masa adindan (guestLabel) farki:
+          bunlar masadaki AYRI siparislerin sahipleri — "Ali, Ziya" gibi.
+          Kasiyer masayi acmadan kimin oturdugunu gorebilsin diye burada.
+          Ad verilmemisse hic gorunmez; ozellik tamamen opsiyonel. */}
+      {guestNames.length > 0 && (
+        <div className="table-card__guests" title={guestNames.join(', ')}>
+          {guestNames.join(' · ')}
+        </div>
+      )}
 
       {/* Time row */}
       <div className="table-card__time-row">

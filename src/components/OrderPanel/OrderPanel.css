@@ -516,6 +516,65 @@
   text-transform: uppercase;
   letter-spacing: 0.03em;
   flex: 1;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.om-order-group__label:hover {
+  color: var(--color-accent);
+}
+
+/* Kisi adi verilmisse sira numarasi ("Sipariş 2") kucuk bir alt bilgi
+   olarak yaninda kalir — kasiyer hangi grup oldugunu kaybetmesin. */
+.om-order-group__label-sub {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--color-text-muted);
+  text-transform: none;
+  letter-spacing: 0;
+  flex-shrink: 0;
+}
+
+.om-order-group__label-input {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  color: var(--color-text-primary);
+  padding: 2px 8px;
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-input);
+  background: var(--color-bg-card);
+  outline: none;
+}
+
+/* Kisiyi (siparis grubunu) baska masaya tasi */
+.om-order-group__move-btn {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 12px;
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.om-order-group__move-btn:hover {
+  background: var(--color-accent-light);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
 }
 
 .om-order-group__subtotal {
