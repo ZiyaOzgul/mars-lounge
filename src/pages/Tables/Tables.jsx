@@ -603,6 +603,29 @@ function Tables() {
         .catch(e => console.warn('[Tables] masa taşıma — kalıcı sipariş taşınamadı', e))
     }
 
+    // Masaya verilen geçici ad da masayla BİRLİKTE gitsin. "Ziya" diye
+    // adlandırılmış masayı komple taşıyınca ad eski masada kalıp siliniyordu;
+    // kasiyer taşıdığı masayı yeniden adlandırmak zorunda kalıyordu.
+    //
+    // Kaynakta ad yoksa hedefin kendi adına dokunmuyoruz (boş bir masa da
+    // önceden adlandırılmış olabilir) — yalnızca taşınan ad varsa o kazanır.
+    // Masa kapandığında ad zaten "doluydu → boşaldı" geçişinde siliniyor,
+    // yani masa numarasına dönüş bu yolda da kendiliğinden oluyor.
+    const movingLabel = tableLabels[String(fromTableId)]
+    if (movingLabel) {
+      setTableLabels(prev => {
+        const next = { ...prev }
+        delete next[String(fromTableId)]
+        next[String(toTableId)] = movingLabel
+        return next
+      })
+      // Sırayla: iki persistDb aynı anda çalışıp birbirinin yazdığını
+      // ezmesin (db.export() bağlantıyı kapatıp yeniden açıyor).
+      persistClearTableLabel(fromTableId)
+        .then(() => persistTableLabel(toTableId, movingLabel))
+        .catch(e => console.warn('[Tables] masa adı taşınamadı', e))
+    }
+
     setRuntimeStates(prev => {
       const from = prev[fromTableId]
       if (!from) return prev
