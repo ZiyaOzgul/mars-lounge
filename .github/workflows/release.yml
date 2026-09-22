@@ -10,7 +10,21 @@ permissions:
 
 jobs:
   release:
-    runs-on: windows-latest
+    # Windows ve macOS ayri kosucularda derleniyor: electron-builder bir
+    # platformun kurulum dosyasini yalnizca o platformda uretebiliyor.
+    # max-parallel: 1 - iki is ayni GitHub release'ini olusturmaya
+    # calisip birbiriyle yarismasin, ikincisi mevcut release'e eklesin.
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: --win
+          - os: macos-latest
+            platform: --mac
+
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
@@ -32,6 +46,10 @@ jobs:
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
 
       - name: Build and publish Electron app
-        run: npx electron-builder --win --publish always
+        run: npx electron-builder ${{ matrix.platform }} --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS derlemesi IMZALANMIYOR: Apple Developer hesabi yok.
+          # electron-builder kosucuda rastgele bir imza aramasin diye
+          # kapatiyoruz (package.json'da mac.identity = null ile birlikte).
+          CSC_IDENTITY_AUTO_DISCOVERY: false
