@@ -189,9 +189,14 @@ function Tables() {
     // bekleniyor..." diye bos kalir. Kisa araliklarla birkac kez deniyoruz.
     let orderItems = []
     const fetchItems = async () => {
+      // variant_id + product_variants(name) SART: bunlar secilmeden gelen
+      // ad yalnizca ana urun oluyordu. "COOL LIME (Nane)" onay ekraninda ve
+      // onaydan sonra masada duz "COOL LIME" olarak gorunuyor, musterinin
+      // hangi versiyonu istedigi kayboluyordu. Fiyat zaten dogru geliyor
+      // (unit_price varyantin fiyati), kaybolan yalnizca ad bilgisiydi.
       const { data, error } = await supabase
         .from('order_items')
-        .select('id, quantity, unit_price, products(name), order_item_modifiers(id, modifier_id, name, price_delta, quantity)')
+        .select('id, quantity, unit_price, variant_id, products(name), product_variants(name), order_item_modifiers(id, modifier_id, name, price_delta, quantity)')
         .eq('order_id', newOrder.id)
       if (error) { console.warn('[QR-DEBUG] order_items query error:', error); return null }
       return data
@@ -205,7 +210,12 @@ function Tables() {
       if (data) {
         orderItems = data.map(item => ({
           id:        item.id,
-          name:      item.products?.name ?? 'Ürün',
+          // sync.js'teki remoteItemName ile AYNI bicim: "Ürün (Varyant)".
+          // Iki yol ayni siparisi farkli adla gostermesin.
+          name:      item.product_variants?.name
+            ? `${item.products?.name ?? 'Ürün'} (${item.product_variants.name})`
+            : (item.products?.name ?? 'Ürün'),
+          variantId: item.variant_id ?? null,
           qty:       item.quantity,
           unitPrice: item.unit_price,
           note:      '',

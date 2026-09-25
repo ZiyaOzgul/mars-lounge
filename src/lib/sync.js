@@ -104,7 +104,11 @@ export async function syncToSupabase(log = null) {
   // ── Pending deletes ────────────────────────────────────────────
   const pendingDeletes = getPendingDeletes()
   for (const pd of pendingDeletes) {
-    const tableMap = { product: 'products', category: 'categories', ingredient: 'ingredients', modifier: 'modifiers', variant: 'product_variants', payment: 'payments' }
+    // order_item BURADA YOKTU — masadan silinen urunun mezar tasi
+    // "bilinmeyen tur" sayilip sessizce atiliyor, silme sunucuya hic
+    // gitmiyordu. order_item_modifiers ve payment_items, order_items'a
+    // ON DELETE CASCADE ile bagli; cocuk satirlari ayrica silmeye gerek yok.
+    const tableMap = { product: 'products', category: 'categories', ingredient: 'ingredients', modifier: 'modifiers', variant: 'product_variants', payment: 'payments', order_item: 'order_items' }
     const table = tableMap[pd.entity_type]
     if (!table) { await clearPendingDelete(pd.id); continue }
     // .select('id') ŞART: PostgREST, hiçbir satır eşleşmese bile DELETE'te
@@ -119,6 +123,22 @@ export async function syncToSupabase(log = null) {
     // tombstone KORUNMALI — pull filtresi kaydı gizli tutar ve bir sonraki
     // tur tekrar dener. Sonuncusunda ise temizlenmeli, yoksa sonsuza kadar
     // kuyrukta kalır. Bu yüzden 0 satırda varlık kontrolü yapıyoruz.
+    // Kalem silmede ek emniyet: odemesi BASKA bir cihazda (mobil bolusme)
+    // kaydedilmis ve bize henuz cekilmemis bir kalem, yerelde "odenmemis"
+    // gorunur. payment_items order_items'a ON DELETE CASCADE ile bagli
+    // oldugu icin boyle bir kalemi silmek odeme-kalem bagini koparir.
+    // Para kaybolmaz (odeme satiri siparise bagli) ama dokum bozulur —
+    // bu yuzden sunucuya sorup odemesi varsa silmiyoruz.
+    if (pd.entity_type === 'order_item') {
+      const { data: odemeli, error: odemeErr } = await supabase
+        .from('payment_items').select('order_item_id').eq('order_item_id', pd.remote_id).limit(1)
+      if (!odemeErr && odemeli && odemeli.length > 0) {
+        await clearPendingDelete(pd.id)
+        inf(`[Sync] ℹ Kalem silinmedi — ödemesi var, kayıt korunuyor: remote:${pd.remote_id}`)
+        continue
+      }
+    }
+
     const { data: silinen, error } = await supabase
       .from(table).delete().eq('id', pd.remote_id).select('id')
 

@@ -3202,11 +3202,15 @@ export async function ensurePersistedActiveOrder({ tableId, tableName, waiterNam
     seen.add(newId)
   }
 
-  // Drop persisted rows no longer in the runtime group — unless already paid
+  // Drop persisted rows no longer in the runtime group — unless already paid.
+  // Kasiyer ekrandan urun kaldirdiginda satir BURADA siliniyor; mezar tasi
+  // birakilmazsa silme sunucuya hic gitmiyor ve bir sonraki cekim urunu
+  // geri getiriyor (bkz. queueOrderItemDelete).
   const paidSet = getPaidItemIds(orderId)
   if (rowsRes.length) {
     for (const [rid] of rowsRes[0].values) {
       if (!seen.has(rid) && !paidSet.has(rid)) {
+        queueOrderItemDelete(rid)
         db.run('DELETE FROM order_item_modifiers WHERE order_item_id = ?', [rid])
         db.run('DELETE FROM order_items WHERE id = ?', [rid])
       }
@@ -3357,7 +3361,12 @@ export async function upsertRemoteActiveOrder({ remoteId, localId, tableId, tabl
 // her zaman kazanır. Yeni eklenen yerel kalem id'lerini döner.
 function _mergeRemoteOrderItems(localOrderId, items) {
   const addedItemIds = []
+  // Silinmeyi bekleyen kalemler geri yazilmasin. Push henuz calismamisken
+  // gelen bir pull, kasiyerin az once sildigi urunu yerele yeniden ekliyor
+  // ve koruma suresi dolunca ekranda geri beliriyordu.
+  const silinecek = getPendingDeleteRemoteIds('order_item')
   for (const item of (items ?? [])) {
+    if (item.remoteId != null && silinecek.has(String(item.remoteId))) continue
     const localProductId = getLocalProductIdByRemote(item.productRemoteId)
     const localVariantId = getLocalVariantIdByRemote(item.variantRemoteId)
 
@@ -3571,6 +3580,32 @@ export async function insertOrderItem({ orderId, productId, variantId, name, uni
   return id
 }
 
+// KOK NEDEN (masadan silinen urun 5-10 sn sonra geri geliyordu):
+// Kalem yalnizca YERELDE siliniyordu. Supabase'de satir duruyordu, bir
+// sonraki cekim onu geri getiriyor, 8 saniyelik isRecentlyRemoved korumasi
+// bitince de ekranda yeniden beliriyordu. Silmenin sunucuya gitmesi icin
+// mezar tasi (pending_deletes) sart — urun/kategori silmede oldugu gibi.
+//
+// Yalnizca remote_id'si olan satir kuyruga girer; hic gonderilmemis bir
+// kalemin sunucuda karsiligi yok, yerel silme yeterli.
+function queueOrderItemDelete(localItemId) {
+  const res = db.exec('SELECT remote_id FROM order_items WHERE id = ?', [localItemId])
+  const remoteId = res[0]?.values[0]?.[0]
+  if (remoteId) {
+    db.run("INSERT INTO pending_deletes (entity_type, remote_id) VALUES ('order_item', ?)", [remoteId])
+  }
+}
+
+// Silinmeyi bekleyen uzak id'ler. Cekim tarafi bunlari geri yazmasin diye:
+// push henuz calismamisken gelen bir pull, az once silinen kalemi yerele
+// yeniden ekliyordu. Mezar tasi duruyorsa o kalem yok sayilir.
+export function getPendingDeleteRemoteIds(entityType) {
+  requireDb()
+  const res = db.exec('SELECT remote_id FROM pending_deletes WHERE entity_type = ?', [entityType])
+  if (!res.length) return new Set()
+  return new Set(res[0].values.map(([rid]) => String(rid)))
+}
+
 export async function updateOrderItemNote(itemId, note) {
   requireDb()
   db.run('UPDATE order_items SET note = ?, is_synced = 0 WHERE id = ?', [note || null, itemId])
@@ -3579,7 +3614,8 @@ export async function updateOrderItemNote(itemId, note) {
 
 export async function deleteOrderItemRow(itemId) {
   requireDb()
-  // Track delete for sync if it has a remote_id (via order remote)
+  queueOrderItemDelete(itemId)
+  db.run('DELETE FROM order_item_modifiers WHERE order_item_id = ?', [itemId])
   db.run('DELETE FROM order_items WHERE id = ?', [itemId])
   await persistDb()
 }
