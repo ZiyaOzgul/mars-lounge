@@ -16,7 +16,7 @@ import {
   ensurePersistedActiveOrder, setOrderStatus, deleteActiveOrderCascade,
   findStaffForAuth,
 } from '../lib/localDb.js'
-import { getSyncHealth, getAuthFailure, noteWriteRejected, onSyncHealthChange } from '../lib/syncHealth.js'
+import { getSyncHealth, getAuthFailure, noteWriteRejected, noteWriteAccepted, onSyncHealthChange } from '../lib/syncHealth.js'
 import { reopenOrder } from '../lib/reopenOperations.js'
 import { syncToSupabase, pullFromSupabase } from '../lib/sync.js'
 import { deleteProductImage, resetSupabaseData, supabase, isSupabaseReady } from '../lib/supabase.js'
@@ -538,6 +538,63 @@ export function AppProvider({ children }) {
     return () => { off(); clearInterval(t) }
   }, [refreshSyncHealth])
 
+  // Oturumu her senkron turundan ONCE saglama al.
+  //
+  // Eskiden buna hic dokunulmuyordu: supabase-js'in kendi otomatik yenileme
+  // zamanlayicisina guveniliyordu. O zamanlayici pencere arka plandayken
+  // bogulabiliyor (bkz. main.js backgroundThrottling) ve bir kez kacirinca
+  // kendiliginde toparlamiyor. Sonuc: uygulama girisli gorunuyor, okuma ve
+  // ekleme anon olarak calisiyor, GUNCELLEME VE SILME sessizce reddediliyor.
+  // Masalarin kapanmamasinin ve silinenlerin geri gelmesinin kaynagi bu.
+  //
+  // Sira: gecerli token varsa dokunma → yoksa yenile → o da olmazsa
+  // giriste bellege alinan parolayla sessizce yeniden giris yap. Ucu de
+  // olmazsa kullaniciya goster. Kasiyerin hicbir sey yapmasi gerekmiyor.
+  const ensureSession = useCallback(async () => {
+    if (!isSupabaseReady) return false
+    const yenilendi = (session) => {
+      if (!session?.access_token) return false
+      noteWriteAccepted()
+      setAuthFailure(null)
+      return true
+    }
+    try {
+      const { data: sess } = await supabase.auth.getSession()
+      const s = sess?.session
+      // Son 2 dakikaya girdiyse de yenile — tam sinirda bir push'un
+      // yarisinda token'in olmesini istemiyoruz.
+      const kalanMs = s?.expires_at ? s.expires_at * 1000 - Date.now() : -1
+      if (s?.access_token && kalanMs > 120_000) return true
+
+      const { data: r, error: rErr } = await supabase.auth.refreshSession()
+      if (!rErr && yenilendi(r?.session)) {
+        console.log('[Auth] oturum yenilendi')
+        return true
+      }
+      if (rErr) console.warn('[Auth] refreshSession başarısız', rErr)
+
+      const pwd = getLastPassword()
+      const email = currentUser?.email
+      if (pwd && email) {
+        const { data: si, error: siErr } = await supabase.auth.signInWithPassword({ email, password: pwd })
+        if (!siErr && yenilendi(si?.session)) {
+          console.log('[Auth] oturum bellekteki parolayla sessizce kurtarıldı')
+          return true
+        }
+        if (siErr) console.warn('[Auth] sessiz yeniden giriş başarısız', siErr)
+      }
+
+      noteWriteRejected(
+        { code: '42501', message: 'Oturum yenilenemedi — güncelleme ve silme sunucuda reddediliyor' },
+        'oturum tazeleme')
+      setAuthFailure(getAuthFailure())
+      return false
+    } catch (e) {
+      console.warn('[Auth] oturum tazeleme hatası', e)
+      return false
+    }
+  }, [currentUser])
+
   const triggerSync = useCallback(async () => {
     if (isSyncingRef.current) {
       pendingResyncRef.current = true
@@ -552,32 +609,8 @@ export function AppProvider({ children }) {
     const pre = isDbInitialized() ? getUnsyncedCount() : 0
     console.log(`[Sync] ▶ triggerSync başlıyor — bekleyen=${pre}, online=${navigator.onLine}`)
 
-    // Surface auth/session state — without a valid JWT, RLS will reject writes silently to the console
-    try {
-      const { data: sess, error: sessErr } = await supabase.auth.getSession()
-      if (sessErr) console.warn('[Sync] auth.getSession hatası', sessErr)
-      const u = sess?.session?.user
-      console.log('[Sync] session →', {
-        userId: u?.id ?? null,
-        email: u?.email ?? null,
-        hasAccessToken: !!sess?.session?.access_token,
-        expiresAt: sess?.session?.expires_at
-          ? new Date(sess.session.expires_at * 1000).toISOString()
-          : null,
-      })
-      if (!u) {
-        console.warn('[Sync] ⚠ Aktif session yok — RLS koruması varsa yazma işlemleri reddedilir')
-        // Bunu yalnizca konsola yazmak yetmiyordu: okuma ve ekleme anon
-        // olarak calismaya devam ettigi icin uygulama saglam gorunuyor,
-        // yalnizca guncelleme ve silme sessizce reddediliyor.
-        noteWriteRejected(
-          { code: '42501', message: 'Aktif oturum yok — güncelleme ve silme işlemleri sunucuda reddediliyor' },
-          'oturum kontrolü')
-        setAuthFailure(getAuthFailure())
-      }
-    } catch (e) {
-      console.warn('[Sync] session okunamadı', e)
-    }
+    // Yazmalar RLS'e takilmadan once oturumu saglama al (yukariya bak).
+    await ensureSession()
 
     isSyncingRef.current = true
     setIsSyncing(true)
@@ -609,7 +642,7 @@ export function AppProvider({ children }) {
         setTimeout(() => triggerSync(), 0)
       }
     }
-  }, [refreshLocalData, refreshRuntimePaidState, mergeActiveOrdersIntoRuntime, refreshSyncHealth])
+  }, [refreshLocalData, refreshRuntimePaidState, mergeActiveOrdersIntoRuntime, refreshSyncHealth, ensureSession])
 
   const syncIfOnline = useCallback((reason = '?') => {
     console.log(`[Sync] syncIfOnline çağrıldı (sebep=${reason}) — isOnline=${navigator.onLine}, supabaseReady=${isSupabaseReady}`)

@@ -141,6 +141,17 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      // Bu kasa hicbir zaman kapatilmiyor ve gun icinde sik sik kucultuluyor.
+      // Chromium, gorunmeyen bir sayfanin zamanlayicilarini once saniyede
+      // birden dakikada bire dusuruyor, 5 dakika sonra "yogun kisitlama"ya
+      // geciyor. Bu uygulamada zamanlayiciya bagli UC kritik is var:
+      //   * Supabase JWT'sinin otomatik yenilenmesi (supabase-js tick'i)
+      //   * 60 saniyelik periyodik senkron turu
+      //   * acik masalari diske yazan 1 saniyelik debounce
+      // Bogulduklarinda oturum sessizce dusuyor, sonrasinda okuma ve ekleme
+      // anon olarak calismaya devam ederken guncelleme ve silme RLS'e
+      // takiliyor — masalar kapanmiyor, silinenler geri geliyor.
+      backgroundThrottling: false,
     },
   })
 
