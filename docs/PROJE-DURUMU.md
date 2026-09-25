@@ -318,6 +318,58 @@ Masa-1'de Ali (3 ürün ₺410) + Ziya (2 ürün ₺250) → Ziya Masa-6'ya taş
 Masa-1: Ali, 3 ürün ₺410 · Masa-6: Ziya, 4 ürün ₺420 (masanın kendi ₺170'i
 korunarak).
 
+### "Yazma sunucuya ulaşmadı ve kimse fark etmedi" (25 Eylül 2026)
+
+Bu projedeki en pahalı hata sınıfı tek bir cümleyle özetlenebiliyor:
+**ekran "oldu" diyor, sunucuya hiçbir şey gitmiyor.** Üç ayrı olayda çıktı,
+üçü de haftalarca sessiz kaldı:
+
+| olay | neden görünmedi |
+|---|---|
+| v1.7.1 — silinen ürün geri geliyor | PostgREST 0 satır silse bile DELETE'te hata dönmüyor |
+| v1.8.2 — silinen sipariş kalemi geri geliyor | silme hiç kuyruğa alınmıyordu; `deleteOrderItemRow`'da "Track delete for sync" yorumu vardı, altında kod yoktu. `sync.js` tableMap'inde de `order_item` türü yoktu |
+| kapanmayan masalar | RLS 42501 reddi, sonsuza kadar sessizce tekrar deneniyor |
+
+Ortak payda mimari DEĞİL: kaynağın yerel olması bu hataları üretmiyor,
+**gizliyor.** Yerel yazma başarılı olduğu an ekran "tamam" diyor; sunucu
+yazması arka planda kuyruğa giriyor ve başarısız olursa hiçbir iz bırakmıyor.
+
+Özellikle sinsi olan: oturum düşüp anon'a inerse **okuma ve ekleme çalışmaya
+devam ediyor** (`orders_select` ve `orders_insert` anon'a açık), yalnızca
+**güncelleme ve silme** reddediliyor (`authenticated + is_staff()`). Yani
+uygulama sapasağlam görünürken masalar kapanmıyor, silinenler geri geliyor.
+
+**src/lib/syncHealth.js** bu sessizliği bozmak için eklendi:
+
+- **Kuyruk tıkanması** — bir şey `SYNC_STUCK_MINUTES` (5 dk) üzerinde
+  gönderilemiyorsa ekranda kalıcı uyarı, dökümüyle ("3 sipariş, 2 silme").
+  Sayaç `meta` tablosunda (`sync-backlog-since`) tutuluyor; asıl tehlikeli
+  senaryo günlerce süren tıkanma olduğu için yeniden başlatmayı atlatmalı.
+- **Yazma reddi** — push hatalarının hepsi `sync.js`'teki `err()`'den
+  geçiyor, RLS/JWT reddi orada tek noktadan yakalanıyor. Ağ hatası buna
+  DAHİL DEĞİL (tekrar denemekle geçer); reddedilen yazma geçmez, kasiyerin
+  yeniden giriş yapması gerekir — banner'da "Çıkış yap" düğmesi var.
+  Bir yazma başarıyla geçtiği anda uyarı kalkıyor.
+
+**Kural: bir yazmanın yerelde başarılı olması, sunucuya ulaştığı anlamına
+GELMEZ.** Sunucuya gitmesi gereken her mutasyonun ya doğrulanması ya da
+başarısızlığının görünür olması şart.
+
+### Açık kalan mimari soru: kaynak Supabase mi olmalı
+
+Üç uygulama (masaüstü kasa, QR menü, mobil) aynı Supabase'e bağlı. Öneri,
+veriyi ikiye ayırmak:
+
+- **Katalog** (ürün, kategori, varyant, modifier) → Supabase authoritative.
+  Üçünün paylaştığı, nadiren değişen, tek ekrandan düzenlenen veri; "sildim
+  geri geldi" şikayeti tam olarak burada. Çevrimdışıyken katalog düzenleme
+  kapalı olur, satış etkilenmez (okuma yeterli).
+- **Sipariş/ödeme** → local-first kalsın. İnternet kesintisinde ayakta
+  kalması gereken tek şey bu, ve local-first'ün asıl gerekçesi bu.
+
+Karar kullanıcıya bırakıldı (25 Eylül 2026) — çevrimdışıyken ürün
+düzenlemenin kapanması kasa için davranış değişikliği.
+
 ## Canlı veri durumu (13 Eylül 2026)
 
 - **Masa 4** — ✅ **ÇÖZÜLDÜ (14 Eylül 2026).** 20 Ağustos'tan kalma 6 + 12 Eylül'den

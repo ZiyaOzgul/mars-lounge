@@ -11,11 +11,12 @@ import {
   getAllModifiers, upsertModifier, deleteModifier,
   getProductModifierExcludes, setProductModifierExclude,
   getEffectiveModifiersForProduct,
-  getUnsyncedCount, clearAllDataExceptTables,
+  getUnsyncedCount, getUnsyncedBreakdown, clearAllDataExceptTables,
   dedupeSyncedEntities, getAllActiveOrders,
   ensurePersistedActiveOrder, setOrderStatus, deleteActiveOrderCascade,
   findStaffForAuth,
 } from '../lib/localDb.js'
+import { getSyncHealth, getAuthFailure, noteWriteRejected, onSyncHealthChange } from '../lib/syncHealth.js'
 import { reopenOrder } from '../lib/reopenOperations.js'
 import { syncToSupabase, pullFromSupabase } from '../lib/sync.js'
 import { deleteProductImage, resetSupabaseData, supabase, isSupabaseReady } from '../lib/supabase.js'
@@ -200,6 +201,11 @@ export function AppProvider({ children }) {
   const [isSyncing,     setIsSyncing]     = useState(false)
   const [lastSyncAt,    setLastSyncAt]    = useState(null)
   const [unsyncedCount, setUnsyncedCount] = useState(0)
+  // Senkron sağlığı: kuyruk tıkanması + yazma reddi (RLS / düşmüş oturum).
+  // Bkz. src/lib/syncHealth.js — bu iki sinyal olmadan başarısız bir yazma
+  // haftalarca görünmez kalabiliyordu.
+  const [syncStuck,   setSyncStuck]   = useState(null) // { minutes, count, breakdown } | null
+  const [authFailure, setAuthFailure] = useState(null) // { code, message, at } | null
   const [syncLogs,      setSyncLogs]      = useState([])
   const [isOnline,      setIsOnline]      = useState(navigator.onLine)
   // Loyalty: TL value of 1 point (used when redeeming points at checkout)
@@ -508,6 +514,30 @@ export function AppProvider({ children }) {
     setRuntimeStates(next)
   }, [])
 
+  // Tek yerden tazeleme: sync sonrasi, syncHealth olay verdiginde ve
+  // dakikada bir. Sayac zamana bagli oldugu icin (kuyruk degismese de
+  // "5 dakika doldu" anı gelir) periyodik kontrol şart.
+  const refreshSyncHealth = useCallback(() => {
+    if (!isDbInitialized()) return
+    try {
+      const count = getUnsyncedCount()
+      setUnsyncedCount(count)
+      const health = getSyncHealth(count)
+      setSyncStuck(health.stuck
+        ? { minutes: health.minutes, count: health.count, breakdown: getUnsyncedBreakdown() }
+        : null)
+    } catch (e) {
+      console.warn('[AppContext] senkron sağlığı okunamadı', e)
+    }
+    setAuthFailure(getAuthFailure())
+  }, [])
+
+  useEffect(() => {
+    const off = onSyncHealthChange(refreshSyncHealth)
+    const t = setInterval(refreshSyncHealth, 60_000)
+    return () => { off(); clearInterval(t) }
+  }, [refreshSyncHealth])
+
   const triggerSync = useCallback(async () => {
     if (isSyncingRef.current) {
       pendingResyncRef.current = true
@@ -535,7 +565,16 @@ export function AppProvider({ children }) {
           ? new Date(sess.session.expires_at * 1000).toISOString()
           : null,
       })
-      if (!u) console.warn('[Sync] ⚠ Aktif session yok — RLS koruması varsa yazma işlemleri reddedilir')
+      if (!u) {
+        console.warn('[Sync] ⚠ Aktif session yok — RLS koruması varsa yazma işlemleri reddedilir')
+        // Bunu yalnizca konsola yazmak yetmiyordu: okuma ve ekleme anon
+        // olarak calismaya devam ettigi icin uygulama saglam gorunuyor,
+        // yalnizca guncelleme ve silme sessizce reddediliyor.
+        noteWriteRejected(
+          { code: '42501', message: 'Aktif oturum yok — güncelleme ve silme işlemleri sunucuda reddediliyor' },
+          'oturum kontrolü')
+        setAuthFailure(getAuthFailure())
+      }
     } catch (e) {
       console.warn('[Sync] session okunamadı', e)
     }
@@ -554,6 +593,7 @@ export function AppProvider({ children }) {
       refreshRuntimePaidState()
       mergeActiveOrdersIntoRuntime()
       const post = isDbInitialized() ? getUnsyncedCount() : 0
+      refreshSyncHealth()
       setLastSyncAt(new Date())
       addLog('info', `Senkronizasyon tamamlandı. Kalan bekleyen=${post}`)
       console.log(`[Sync] ✓ bitti — ${Math.round(performance.now() - t0)}ms, kalan bekleyen=${post}`)
@@ -569,7 +609,7 @@ export function AppProvider({ children }) {
         setTimeout(() => triggerSync(), 0)
       }
     }
-  }, [refreshLocalData, refreshRuntimePaidState, mergeActiveOrdersIntoRuntime])
+  }, [refreshLocalData, refreshRuntimePaidState, mergeActiveOrdersIntoRuntime, refreshSyncHealth])
 
   const syncIfOnline = useCallback((reason = '?') => {
     console.log(`[Sync] syncIfOnline çağrıldı (sebep=${reason}) — isOnline=${navigator.onLine}, supabaseReady=${isSupabaseReady}`)
@@ -1211,6 +1251,7 @@ export function AppProvider({ children }) {
       effectiveModifiersForProduct,
       // Sync
       isSyncing, lastSyncAt, unsyncedCount, triggerSync, refreshUnsyncedCount, isOnline,
+      syncStuck, authFailure, refreshSyncHealth,
       // Ekran durumunu DB'den sifirdan kurar — Masalar sayfasindaki yenile butonu
       rebuildRuntimeFromDb,
       // Reset

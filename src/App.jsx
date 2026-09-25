@@ -37,7 +37,8 @@ function RequireP({ permKey, children }) {
 }
 
 function AppShell() {
-  const { dbReady, dbError, dbRecoveryWarning, dbWriteWarning, triggerSync } = useApp()
+  const { dbReady, dbError, dbRecoveryWarning, dbWriteWarning, triggerSync,
+          syncStuck, authFailure, logoutUser } = useApp()
   const { isOnline } = useOnlineStatus({ onReconnect: triggerSync })
 
   // Sync once on startup if online and DB is ready
@@ -76,6 +77,34 @@ function AppShell() {
             KAYDEDİLMİYOR — uygulama kapanır veya yeniden başlarsa kaybolur. Çalışmaya devam etmeyin;
             önce bu sorunu çözün (disk dolu, dosya başka bir programda açık veya antivirüs/OneDrive
             engelliyor olabilir). Sorun devam ederse destek ekibiyle iletişime geçin. ({dbWriteWarning.message})
+          </div>
+        )}
+        {/* Yazma reddi: oturum düştüğünde okuma ve ekleme anon olarak
+            çalışmaya devam ediyor, yalnızca güncelleme ve silme sessizce
+            reddediliyor. Uygulama sapasağlam görünürken masalar kapanmıyor,
+            silinenler geri geliyordu — artık görünür. */}
+        {authFailure && (
+          <div className="db-error-banner">
+            ⚠ OTURUM SORUNU: Sunucu değişikliklerinizi reddediyor. Yeni sipariş girişi
+            çalışmaya devam eder, ancak <strong>masa kapatma, ürün silme ve düzenleme
+            sunucuya işlenmiyor.</strong> Lütfen çıkış yapıp yeniden giriş yapın.
+            {logoutUser && (
+              <button className="db-error-banner__action" onClick={() => logoutUser()}>
+                Çıkış yap
+              </button>
+            )}
+          </div>
+        )}
+        {/* Kuyruk tıkanması: bir yazma kalıcı olarak gönderilemiyorsa
+            servis bitmeden fark edilsin. */}
+        {syncStuck && (
+          <div className="db-error-banner">
+            ⚠ {syncStuck.count} kayıt {syncStuck.minutes} dakikadır sunucuya gönderilemiyor
+            {Object.keys(syncStuck.breakdown ?? {}).length > 0 && (
+              <> ({Object.entries(syncStuck.breakdown).map(([ad, n]) => `${n} ${ad}`).join(', ')})</>
+            )}
+            . İnternet bağlantınızı kontrol edin; bağlantı varsa Ayarlar → Bağlantı Durumu'ndan
+            "Şimdi Senkronize Et" deneyin. Bu uyarı geçmiyorsa kayıtlar yalnızca bu bilgisayarda duruyor.
           </div>
         )}
         {!isOnline && (

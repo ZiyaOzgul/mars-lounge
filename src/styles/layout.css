@@ -102,3 +102,21 @@
   color: var(--color-text-secondary);
   margin-top: 2px;
 }
+
+/* Uyarı bandı içindeki eylem düğmesi (örn. "Çıkış yap") */
+.db-error-banner__action {
+  margin-left: 10px;
+  padding: 3px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  color: var(--color-danger);
+  background: var(--color-bg-card);
+  border: 1px solid currentColor;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+}
+
+.db-error-banner__action:hover {
+  background: var(--color-danger-light);
+}

@@ -1996,6 +1996,34 @@ export function getUnsyncedCount() {
   return res[0]?.values[0][0] ?? 0
 }
 
+// Kuyrukta ne bekliyor — kullaniciya "5 kayit bekliyor" demek yetmiyor,
+// "3 siparis, 2 silme" demek gerekiyor ki tikanmanin nerede oldugu
+// anlasilsin. Yalnizca sifirdan buyuk olanlar doner.
+export function getUnsyncedBreakdown() {
+  if (!db) return {}
+  const sorgular = {
+    'kategori':        "SELECT COUNT(*) FROM categories WHERE is_synced = 0",
+    'ürün':            "SELECT COUNT(*) FROM products WHERE is_synced = 0",
+    'malzeme':         "SELECT COUNT(*) FROM ingredients WHERE is_synced = 0",
+    'varyant':         "SELECT COUNT(*) FROM product_variants WHERE is_synced = 0",
+    'sipariş':         "SELECT COUNT(*) FROM orders WHERE is_synced = 0",
+    'sipariş kalemi':  "SELECT COUNT(*) FROM order_items WHERE is_synced = 0",
+    'ödeme':           "SELECT COUNT(*) FROM payments WHERE is_synced = 0",
+    'ödeme kalemi':    "SELECT COUNT(*) FROM payment_items WHERE is_synced = 0",
+    'ekstra':          "SELECT COUNT(*) FROM modifiers WHERE is_synced = 0",
+    'sipariş ekstrası': "SELECT COUNT(*) FROM order_item_modifiers WHERE is_synced = 0",
+    'silme':           "SELECT COUNT(*) FROM pending_deletes",
+  }
+  const out = {}
+  for (const [ad, sql] of Object.entries(sorgular)) {
+    try {
+      const n = db.exec(sql)[0]?.values[0][0] ?? 0
+      if (n > 0) out[ad] = n
+    } catch { /* tablo yoksa atla */ }
+  }
+  return out
+}
+
 // ── Gün bitirme (iş günü sınırları) ───────────────────────────────
 // Kapanış anları raporların gün sınırını belirler; hesaplama mantığı
 // src/lib/businessDay.js içinde, burada yalnızca saklama var.

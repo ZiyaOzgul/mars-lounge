@@ -32,6 +32,7 @@ import {
   setOrderItemRemoteId,
   persistDb,
   getUnsyncedDayClosures, markDayClosureSynced, upsertRemoteDayClosure,
+  getUnsyncedCount,
 } from './localDb.js'
 
 function fmtErr(e) {
@@ -66,6 +67,8 @@ const COMPLETED_BACKFILL_KEY = 'completed-backfill-v1'
 // durumdaydı, yani bazı satışlar hiçbir zaman çekilmiyordu. Artık sayfalıyoruz.
 const PULL_PAGE_SIZE = 500
 
+import { noteWriteRejected, noteWriteAccepted, noteBacklog } from './syncHealth.js'
+
 // .in(...) filtresi sorgu dizesine giriyor; binlerce id URL'i uzunluk
 // sınırının ötesine taşırıp isteği komple düşürür. Parçalayarak gönderiyoruz.
 const PULL_IN_CHUNK = 100
@@ -79,9 +82,19 @@ function remoteItemName(oi) {
 }
 
 export async function syncToSupabase(log = null) {
-  const ok  = (msg) => { console.log(msg);        log?.('success', msg) }
+  // yazmaKabulEdildi: bu turda EN AZ BIR yazma sunucuya gecti mi. Gectiyse
+  // oturum saglam demektir ve varsa eski "oturum dustu" uyarisi kalkar.
+  let yazmaKabulEdildi = false
+  const ok  = (msg) => { console.log(msg); yazmaKabulEdildi = true; log?.('success', msg) }
   const inf = (msg) => { console.log(msg);        log?.('info',    msg) }
-  const err = (msg, e) => { console.error(msg, fmtErr(e), e); log?.('error',  `${msg} — ${fmtErr(e)}`) }
+  // Her push hatasi buradan geciyor; RLS/oturum reddini tek noktada
+  // yakalayip gorunur hale getiriyoruz. Ag hatasi degil bu — tekrar
+  // denemekle gecmez, kasiyerin yeniden giris yapmasi gerekir.
+  const err = (msg, e) => {
+    console.error(msg, fmtErr(e), e)
+    noteWriteRejected(e, msg)
+    log?.('error',  `${msg} — ${fmtErr(e)}`)
+  }
 
   if (!isSupabaseReady) {
     inf('[Sync] Supabase yapılandırılmamış — senkronizasyon atlandı')
@@ -674,6 +687,20 @@ export async function syncToSupabase(log = null) {
   } else {
     inf('[Sync] Yüklenecek yeni kayıt yok')
   }
+
+  // Bu turda bir yazma sunucuya gectiyse oturum saglam — varsa eski
+  // "yazma reddedildi" uyarisini kaldir.
+  if (yazmaKabulEdildi) noteWriteAccepted()
+
+  // Kuyrukta ne kaldi? Bos degilse "ne zamandir dolu" sayaci baslar;
+  // esigi asarsa ekranda kalici uyari cikar. Tikanmanin gorunmez kalmasi
+  // bu projede en pahaliya mal olan seydi.
+  try {
+    await noteBacklog(getUnsyncedCount())
+  } catch (e) {
+    console.warn('[Sync] kuyruk sağlığı yazılamadı', e)
+  }
+
   return synced
 }
 
