@@ -16,7 +16,20 @@ import {
   ensurePersistedActiveOrder, setOrderStatus, deleteActiveOrderCascade,
   findStaffForAuth,
 } from '../lib/localDb.js'
-import { getSyncHealth, getAuthFailure, noteWriteRejected, noteWriteAccepted, onSyncHealthChange } from '../lib/syncHealth.js'
+import { getSyncHealth, getAuthFailure, noteWriteRejected, noteWriteAccepted, onSyncHealthChange,
+         beginSyncTurn, serverErrorsInTurn, isServerUnavailable } from '../lib/syncHealth.js'
+import { isOwnEcho, pruneEchoes } from '../lib/syncEcho.js'
+
+// Sunucu ulasilamazken (402 kota kilidi, 5xx, ag) otomatik senkron turlari
+// bu araliklarla seyreliyor. 3 Ekim 2026'da proje kilitlendiginde masaustu
+// saatte ~500 basarisiz istekle sunucuyu dovmeye devam etti ve log kotasini
+// daha da doldurdu. Elle senkron bu bekleme suresini her zaman atlar.
+const SYNC_BACKOFF_STEPS_MS = [60_000, 120_000, 300_000, 600_000, 900_000]
+
+// Periyodik guvenlik agi. Canli degisiklikler realtime ile aninda geliyor;
+// bu tur yalnizca kacirilan bir olayi ve basarisiz push'lari yakalamak icin.
+// 60 sn idi — gunde ~1.400 tam tur demekti.
+const PERIODIC_SYNC_MS = 120_000
 import { reopenOrder } from '../lib/reopenOperations.js'
 import { syncToSupabase, pullFromSupabase } from '../lib/sync.js'
 import { deleteProductImage, resetSupabaseData, supabase, isSupabaseReady } from '../lib/supabase.js'
@@ -206,6 +219,11 @@ export function AppProvider({ children }) {
   // haftalarca görünmez kalabiliyordu.
   const [syncStuck,   setSyncStuck]   = useState(null) // { minutes, count, breakdown } | null
   const [authFailure, setAuthFailure] = useState(null) // { code, message, at } | null
+  // Sunucu ulasilamiyor (402 kota kilidi / 5xx / ag): { since, retryAt } | null.
+  // Kasiyer satisa devam edebiliyor; bu yalnizca "QR siparisleri gelmiyor,
+  // kayitlar sonra gonderilecek" bilgisini vermek icin.
+  const [serverDown,  setServerDown]  = useState(null)
+  const backoffRef = useRef({ failures: 0, until: 0, since: 0 })
   const [syncLogs,      setSyncLogs]      = useState([])
   const [isOnline,      setIsOnline]      = useState(navigator.onLine)
   // Loyalty: TL value of 1 point (used when redeeming points at checkout)
@@ -228,7 +246,12 @@ export function AppProvider({ children }) {
   const runtimeStatesRef  = useRef(runtimeStates)
   useEffect(() => { runtimeStatesRef.current = runtimeStates }, [runtimeStates])
   const loginUser  = useCallback((u) => setCurrentUser(u), [])
+  // Kasiyer "Çıkış yap"a bastığında true. Supabase'in SIGNED_OUT olayı hem
+  // bilinçli çıkışta hem de oturum yenilemesi başarısız olduğunda geliyor;
+  // ikisini ayırmanın tek yolu bu bayrak (bkz. onAuthStateChange).
+  const userLogoutRef = useRef(false)
   const logoutUser = useCallback(async () => {
+    userLogoutRef.current = true
     if (isSupabaseReady) {
       try { await supabase.auth.signOut() } catch (e) { console.error('[Auth] signOut failed', e) }
     }
@@ -278,7 +301,24 @@ export function AppProvider({ children }) {
     const { data: sub } = supabase.auth.onAuthStateChange(async (event, session) => {
       if (!mounted) return
       console.log('[Auth] state change', event, session?.user?.id ?? null)
+      // ISTEMSIZ oturum kaybi: kasiyeri ATMA.
+      //
+      // 3 Ekim 2026: proje kota asimiyla kilitlenip her istege 402 donunce
+      // token yenilemesi basarisiz oldu, supabase-js oturumu silip SIGNED_OUT
+      // yayinladi ve uygulama kasiyeri giris ekranina atti. Giris ekrani da
+      // 402'yi "ag hatasi" saymadigi icin cevrimdisi girise dusmedi — kasa
+      // tamamen durdu. Oysa yerel veritabani ve satis akisi saglamdi.
+      //
+      // Artik: bilincli cikis disindaki her SIGNED_OUT'ta kasiyer icerde
+      // kalir, cevrimdisi moda gecer, satis yerelde devam eder. Sunucu
+      // donunce ensureSession() bellekteki parolayla oturumu sessizce kurar.
+      if (event === 'SIGNED_OUT' && !userLogoutRef.current) {
+        console.warn('[Auth] oturum istemsiz düştü — kasiyer çıkarılmıyor, çevrimdışı moda geçiliyor')
+        setCurrentUser(prev => (prev ? { ...prev, offlineAuth: true } : prev))
+        return
+      }
       if (event === 'SIGNED_OUT' || !session?.user) {
+        userLogoutRef.current = false
         setCurrentUser(null)
         return
       }
@@ -550,6 +590,10 @@ export function AppProvider({ children }) {
   // Sira: gecerli token varsa dokunma → yoksa yenile → o da olmazsa
   // giriste bellege alinan parolayla sessizce yeniden giris yap. Ucu de
   // olmazsa kullaniciya goster. Kasiyerin hicbir sey yapmasi gerekmiyor.
+  // Oturum istegi 402/5xx aldiysa bu tur "sunucu ulasilamiyor" sayilir ve
+  // geri cekilmeyi besler (bkz. triggerSync'in finally blogu).
+  const authServerErrorRef = useRef(false)
+
   const ensureSession = useCallback(async () => {
     if (!isSupabaseReady) return false
     const yenilendi = (session) => {
@@ -572,6 +616,14 @@ export function AppProvider({ children }) {
         return true
       }
       if (rErr) console.warn('[Auth] refreshSession başarısız', rErr)
+      // Sunucu kilitli ya da ulasilamiyorsa bu bir oturum sorunu DEGIL:
+      // parolayla yeniden girisi denemek bosuna istek, "oturum sorunu"
+      // uyarisi da yaniltici olur. Geri cekilme bunu ele aliyor.
+      if (rErr && isServerUnavailable(rErr)) {
+        authServerErrorRef.current = true
+        console.warn('[Auth] sunucu ulaşılamıyor — oturum yenileme ertelendi', rErr?.message ?? rErr)
+        return false
+      }
 
       const pwd = getLastPassword()
       const email = currentUser?.email
@@ -582,6 +634,11 @@ export function AppProvider({ children }) {
           return true
         }
         if (siErr) console.warn('[Auth] sessiz yeniden giriş başarısız', siErr)
+        if (siErr && isServerUnavailable(siErr)) {
+          authServerErrorRef.current = true
+          console.warn('[Auth] sunucu ulaşılamıyor — sessiz yeniden giriş ertelendi', siErr?.message ?? siErr)
+          return false
+        }
       }
 
       noteWriteRejected(
@@ -595,7 +652,18 @@ export function AppProvider({ children }) {
     }
   }, [currentUser])
 
-  const triggerSync = useCallback(async () => {
+  // opts.manual: kullanici bastı → geri cekilme beklemesini atla.
+  // opts.full:   katalogu da cek (acilis disinda elle senkron, yenile tusu).
+  // DIKKAT: onClick={triggerSync} gibi dogrudan baglanirsa ilk arguman
+  // React olay nesnesi olur; o yuzden bayraklari === true ile okuyoruz.
+  const triggerSync = useCallback(async (opts = {}) => {
+    const manual = opts?.manual === true
+    const full   = opts?.full === true
+    if (!manual && Date.now() < backoffRef.current.until) {
+      const kalan = Math.round((backoffRef.current.until - Date.now()) / 1000)
+      console.log(`[Sync] sunucu ulaşılamıyor — otomatik tur atlandı, ${kalan} sn sonra tekrar denenecek`)
+      return
+    }
     if (isSyncingRef.current) {
       pendingResyncRef.current = true
       console.warn('[Sync] ⚠ başka bir sync çalışıyor — bu istek kuyruğa alındı, bitince tekrar denenecek')
@@ -609,6 +677,9 @@ export function AppProvider({ children }) {
     const pre = isDbInitialized() ? getUnsyncedCount() : 0
     console.log(`[Sync] ▶ triggerSync başlıyor — bekleyen=${pre}, online=${navigator.onLine}`)
 
+    beginSyncTurn()
+    pruneEchoes()
+    authServerErrorRef.current = false
     // Yazmalar RLS'e takilmadan once oturumu saglama al (yukariya bak).
     await ensureSession()
 
@@ -621,7 +692,7 @@ export function AppProvider({ children }) {
     try {
       const pushed = await syncToSupabase(addLog)
       console.log('[Sync] push sonucu →', pushed)
-      await pullFromSupabase(addLog)
+      await pullFromSupabase(addLog, { catalog: full })
       refreshLocalData()
       refreshRuntimePaidState()
       mergeActiveOrdersIntoRuntime()
@@ -634,6 +705,21 @@ export function AppProvider({ children }) {
       console.error('[Sync] ✗ triggerSync hata', e)
       addLog('error', 'Senkronizasyon hatası: ' + (e.message ?? String(e)))
     } finally {
+      // Geri cekilme: bu turda sunucu ulasilamaz hatasi aldiysak bir sonraki
+      // otomatik turu artan aralikla ertele; temiz bir tur sayaci sifirlar.
+      const sunucuYok = serverErrorsInTurn() > 0 || authServerErrorRef.current
+      if (sunucuYok) {
+        const f = backoffRef.current.failures + 1
+        const bekle = SYNC_BACKOFF_STEPS_MS[Math.min(f - 1, SYNC_BACKOFF_STEPS_MS.length - 1)]
+        const since = backoffRef.current.since || Date.now()
+        backoffRef.current = { failures: f, until: Date.now() + bekle, since }
+        setServerDown({ since, retryAt: Date.now() + bekle })
+        console.warn(`[Sync] sunucu ulaşılamıyor (${f}. ardışık tur) — ${Math.round(bekle / 1000)} sn geri çekiliniyor`)
+      } else if (backoffRef.current.failures > 0) {
+        backoffRef.current = { failures: 0, until: 0, since: 0 }
+        setServerDown(null)
+        console.log('[Sync] sunucu yeniden ulaşılabilir — normal senkron sürüyor')
+      }
       isSyncingRef.current = false
       setIsSyncing(false)
       if (pendingResyncRef.current) {
@@ -708,7 +794,7 @@ export function AppProvider({ children }) {
     if (!dbReady || dbError) return
     const t = setInterval(() => {
       if (initialSyncRanRef.current) syncIfOnline('interval')
-    }, 60_000)
+    }, PERIODIC_SYNC_MS)
     return () => clearInterval(t)
   }, [dbReady, dbError, syncIfOnline])
 
@@ -730,14 +816,24 @@ export function AppProvider({ children }) {
     }
     debounced.cancel = () => { if (t) { clearTimeout(t); t = null } }
 
+    // Kendi push'umuzun yankisiysa tur baslatma — bkz. src/lib/syncEcho.js.
+    // Baska cihazdan (QR, mobil) gelen degisiklik buradan gecmez, aninda
+    // senkron tetikler.
+    const onChange = (payload) => {
+      const row = payload?.new && Object.keys(payload.new).length ? payload.new : payload?.old
+      const id = payload?.table === 'payment_items' ? row?.order_item_id : row?.id
+      if (isOwnEcho(payload?.table, id)) return
+      debounced()
+    }
+
     const ch = supabase
       .channel('desktop-orders-realtime')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'orders' }, debounced)
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'orders' }, debounced)
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'order_items' }, debounced)
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'order_items' }, debounced)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'payments' }, debounced)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'payment_items' }, debounced)
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'orders' }, onChange)
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'orders' }, onChange)
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'order_items' }, onChange)
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'order_items' }, onChange)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'payments' }, onChange)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'payment_items' }, onChange)
       .subscribe()
 
     return () => { debounced.cancel(); supabase.removeChannel(ch) }
@@ -1284,7 +1380,7 @@ export function AppProvider({ children }) {
       effectiveModifiersForProduct,
       // Sync
       isSyncing, lastSyncAt, unsyncedCount, triggerSync, refreshUnsyncedCount, isOnline,
-      syncStuck, authFailure, refreshSyncHealth,
+      syncStuck, authFailure, refreshSyncHealth, serverDown,
       // Ekran durumunu DB'den sifirdan kurar — Masalar sayfasindaki yenile butonu
       rebuildRuntimeFromDb,
       // Reset

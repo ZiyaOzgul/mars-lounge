@@ -355,6 +355,69 @@ uygulama sapasağlam görünürken masalar kapanmıyor, silinenler geri geliyor.
 GELMEZ.** Sunucuya gitmesi gereken her mutasyonun ya doğrulanması ya da
 başarısızlığının görünür olması şart.
 
+### Kota kilidi ve kasanın durması (3 Ekim 2026)
+
+**Ne oldu:** ücretsiz planda 5 GB'lık *cached egress* kotası aşıldı (8 GB).
+UTC 06:00'dan itibaren Supabase her isteğe — REST, Auth, realtime — HTTP 402
+döndü. Gerçek gövde:
+
+    Service for this project is restricted due to the following violations:
+    exceed_cached_egress_quota. The project owner must upgrade their plan or
+    remove spend caps to restore service.
+
+Ücretsiz planda kilit, fatura döneminin başına kadar (org 8 Ağustos'ta
+açıldı → ~her ayın 8'i) ya da Pro'ya geçilene kadar sürüyor.
+
+**Egress'i kim yaktı — masaüstü DEĞİL, QR menüdeki resimler:**
+
+| | dosya | toplam | ortalama |
+|---|---|---|---|
+| category-images | 10 | 21 MB | 2,17 MB |
+| product-images | 60 | 33 MB | 565 KB |
+
+`mars-lounge-web/app/components/menu/ProductCatalog.tsx` kategori resimlerini
+`backgroundImage: url(...)` ile basıyor — Next.js resim optimizasyonunu
+atlıyor, her müşteri 10 adet ~2 MB PNG indiriyor. Ürün resimlerinin
+orijinalleri de Netlify ImageCDN tarafından tekrar tekrar çekiliyor. Yüklenen
+dosyalarda `Cache-Control` yok. Günde ~180 MB → bir ayda 5-8 GB.
+**(Düzeltilmedi — resimlerin sıkıştırılması kilit kalkınca yapılacak.)**
+
+**Log kotasını masaüstü doldurdu:** günde 16.896 isteğin %92'si.
+  * Her senkron turunda tüm katalog yeniden çekiliyordu (7 tablo × ~1.100/gün)
+  * Uygulama kendi push'unun realtime yankısına tepki verip ek tam tur
+    başlatıyordu (saatte 60 olması gereken tur 131'e çıkıyordu)
+  * Kapanan siparişlerin id listesi her turda 30 günü baştan tarıyordu
+  * Kilitliyken geri çekilme yoktu: saatte ~500 REST + ~300 realtime denemesi
+
+**Kasa neden durdu — asıl ders:** local-first tasarım tam bu an için vardı
+ama giriş akışı onu kilitledi. 402 alan token yenilemesi supabase-js'in
+oturumu silip `SIGNED_OUT` yayınlamasına yol açtı, uygulama kasiyeri giriş
+ekranına attı; giriş ekranı da yalnızca "ağ hatası"nda çevrimdışı girişe
+düşüyordu, 402'de düşmedi. Yerel veritabanı ve satış akışı sağlamken kasa
+kullanılamaz hale geldi.
+
+**v1.8.3'teki düzeltmeler:**
+  * Bilinçli çıkış dışındaki `SIGNED_OUT` kasiyeri atmıyor — çevrimdışı moda
+    geçiriyor; sunucu dönünce `ensureSession()` oturumu sessizce kuruyor
+  * Giriş ekranı sunucu ulaşılamazken (402/5xx/ağ) çevrimdışı girişe düşüyor
+  * `syncHealth.isServerUnavailable()` — 402/5xx/ağ hatasını RLS reddinden
+    ayırıyor (kilit "oturum sorunu" diye gösterilmiyor); hem `code` hem
+    `status` okunuyor (AuthApiError'da HTTP durumu `status`'ta)
+  * Geri çekilme: sunucu ulaşılamazsa otomatik turlar 1 → 2 → 5 → 10 → 15 dk;
+    elle senkron beklemeyi atlıyor
+  * Katalog her turda değil, açılışta + 15 dakikada bir + elle senkronda
+  * Kendi push'umuzun realtime yankısı `syncEcho.js` ile yok sayılıyor
+  * Kapanan sipariş listesi artımlı (son listelemeden bu yana, 10 dk pay;
+    6 saatte bir tam pencere)
+  * `tables.status` aynı değer için tekrar PATCH'lenmiyor
+  * Periyodik tur 60 sn → 120 sn
+  * Realtime yeniden bağlanma uzun kesintide 2 dakikada bire iniyor
+  * "Sunucuya ulaşılamıyor — kasa yerelde çalışıyor" bandı
+
+**Kural: sunucu ne yaparsa yapsın, bu cihazda daha önce giriş yapmış
+personel satışa devam edebilmeli.** Kimlik doğrulama hatası (yanlış şifre)
+ile sunucu hatası (402, 5xx, ağ) ASLA aynı muameleyi görmemeli.
+
 ### Açık kalan mimari soru: kaynak Supabase mi olmalı
 
 Üç uygulama (masaüstü kasa, QR menü, mobil) aynı Supabase'e bağlı. Öneri,

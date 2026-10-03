@@ -74,6 +74,34 @@ export function getAuthFailure() {
   return authFailure
 }
 
+// ── Sunucu erişilemezliği: kota kilidi (402), sunucu hatası (5xx), ağ ──
+//
+// Yazma reddinden (RLS) FARKLI bir durum: burada kasiyerin yapabileceği bir
+// şey yok, sunucu ya kilitli ya da ulaşılamıyor. 3 Ekim 2026'da proje
+// kotayı aşıp her isteğe 402 dönmeye başladığında masaüstü saatte ~500 REST
+// + ~300 realtime denemesiyle sunucuyu dövmeye devam etti; hepsi reddedildi
+// ve log kotasını daha da doldurdu. Bu sinyal geri çekilmeyi (backoff)
+// besliyor — sunucu düşükken uygulama bekliyor, yerelde çalışmaya devam ediyor.
+export function isServerUnavailable(error) {
+  if (!error) return false
+  // Supabase Auth hatalarinda (AuthApiError) code bir metin ("unexpected_failure"
+  // gibi), HTTP durumu ayri bir status alaninda. Ikisine de bakmak sart —
+  // yalnizca code'a bakan surum 402'yi kaciriyordu.
+  for (const c of [error.status, error.code]) {
+    const s = String(c ?? '')
+    if (s === '402' || /^5\d\d$/.test(s)) return true
+  }
+  const msg = String(error.message ?? error)
+  return /payment required|restricted|exceed|quota|failed to fetch|networkerror|network request failed|load failed|ECONNRESET|ETIMEDOUT|timed? ?out|\b50[234]\b/i.test(msg)
+}
+
+let serverErrorsThisTurn = 0
+export function beginSyncTurn() { serverErrorsThisTurn = 0 }
+export function noteServerError(error) {
+  if (isServerUnavailable(error)) serverErrorsThisTurn++
+}
+export function serverErrorsInTurn() { return serverErrorsThisTurn }
+
 // Kuyruk boş değilse "ne zamandır dolu" bilgisini saklar, boşalınca siler.
 // meta tablosunda tutuluyor çünkü tıkanma uygulama yeniden başlatılınca
 // kaybolmamalı — asıl tehlikeli senaryo tam olarak günlerce süren tıkanma.

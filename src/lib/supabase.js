@@ -9,8 +9,20 @@ const key        = import.meta.env.VITE_SUPABASE_ANON_KEY
 const noLock = (_name, _acquireTimeout, fn) => fn()
 
 // supabase is null when env vars are not configured (offline / dev without credentials)
+// Realtime yeniden baglanma araligi. Varsayilan kisa bir merdivenden sonra
+// 10 saniyede sabitleniyor; sunucu uzun sure ulasilamaz oldugunda bu saatte
+// ~360 baglanti denemesi demek. 3 Ekim 2026'daki kota kilidinde loglarda
+// saatte 250-350 basarisiz websocket denemesi vardi. Kisa kopmalar yine
+// saniyeler icinde toparlaniyor; uzun kesintide 2 dakikada bire iniyor.
+const REALTIME_RECONNECT_MS = [1_000, 2_000, 5_000, 10_000, 30_000, 60_000]
+const realtimeReconnectAfterMs = (tries) =>
+  REALTIME_RECONNECT_MS[tries - 1] ?? 120_000
+
 export const supabase = url && key
-  ? createClient(url, key, { auth: { lock: noLock } })
+  ? createClient(url, key, {
+      auth: { lock: noLock },
+      realtime: { reconnectAfterMs: realtimeReconnectAfterMs },
+    })
   : null
 export const isSupabaseReady = !!supabase
 

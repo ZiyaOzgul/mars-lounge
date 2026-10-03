@@ -128,7 +128,7 @@ function Tables() {
     try {
       rebuildRuntimeFromDb()
       setSelectedTableId(null)
-      if (isOnline) await triggerSync()
+      if (isOnline) await triggerSync({ manual: true, full: true })
     } catch (e) {
       console.warn('[Tables] yenileme başarısız', e)
     } finally {

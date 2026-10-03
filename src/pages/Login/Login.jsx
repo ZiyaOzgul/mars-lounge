@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { supabase, isSupabaseReady } from '../../lib/supabase.js'
 import { isDbInitialized, findStaffForAuth, getOfflineCredential, saveOfflineCredential } from '../../lib/localDb.js'
 import { hashPassword, verifyPassword, setLastPassword } from '../../lib/offlineAuth.js'
+import { isServerUnavailable } from '../../lib/syncHealth.js'
 import './Login.css'
 
 function withTimeout(promise, ms, label) {
@@ -171,8 +172,14 @@ function Login({ onLogin }) {
       const msg = err?.message ?? String(err)
       if (/invalid login credentials/i.test(msg)) {
         setError('E-posta veya şifre hatalı.')
-      } else if (/fetch|network|yanıt vermedi|Failed to fetch|timeout/i.test(msg)) {
-        console.warn('[Login] online giriş ağ hatası — çevrimdışı girişe düşülüyor', msg)
+      } else if (/fetch|network|yanıt vermedi|Failed to fetch|timeout/i.test(msg) || isServerUnavailable(err)) {
+        // Sunucu ulasilamiyor ya da KILITLI (402 kota asimi, 5xx). 3 Ekim
+        // 2026'da proje kota asimiyla kilitlendiginde bu dal yalnizca ag
+        // hatasini kapsiyordu; 402 "bilinmeyen hata" olarak ekrana basildi ve
+        // kasiyer, cihazda kayitli kimlik bilgisi oldugu halde giris
+        // yapamadi — kasa durdu. Sunucunun durumu ne olursa olsun, bu cihazda
+        // daha once giris yapmis personel calismaya devam edebilmeli.
+        console.warn('[Login] sunucuya ulaşılamıyor — çevrimdışı girişe düşülüyor', msg)
         await offlineLogin(cleanEmail, password)
       } else {
         setError(msg)

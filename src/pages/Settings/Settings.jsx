@@ -1376,7 +1376,7 @@ function Settings() {
                 </div>
                 <button
                   className="st-sync-btn"
-                  onClick={triggerSync}
+                  onClick={() => triggerSync({ manual: true, full: true })}
                   disabled={!isOnline || isSyncing || unsyncedCount === 0}
                 >
                   {isSyncing

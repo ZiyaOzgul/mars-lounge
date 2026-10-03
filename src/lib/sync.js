@@ -67,7 +67,31 @@ const COMPLETED_BACKFILL_KEY = 'completed-backfill-v1'
 // durumdaydı, yani bazı satışlar hiçbir zaman çekilmiyordu. Artık sayfalıyoruz.
 const PULL_PAGE_SIZE = 500
 
-import { noteWriteRejected, noteWriteAccepted, noteBacklog } from './syncHealth.js'
+import { noteWriteRejected, noteWriteAccepted, noteBacklog, noteServerError } from './syncHealth.js'
+import { notePushed } from './syncEcho.js'
+
+// Katalog (kategori, urun, varyant, ekstra, malzeme, gun kapanislari) artik
+// HER turda cekilmiyor. Loglarda bu yedi tablonun her biri gunde ~1.100 kez
+// cekiliyordu — hicbiri degismese bile. Katalogu yalnizca bu masaustu
+// duzenliyor; baska cihazdan gelecek bir degisiklik icin 15 dakika gecikme
+// kabul edilebilir. Elle senkron ve uygulama acilisi her zaman tam ceker.
+export const CATALOG_PULL_MS = 15 * 60_000
+let lastCatalogPullAt = 0
+
+// "Kapanan siparisler" id listesi artik her turda 30 gunu bastan taramiyor:
+// yalnizca son listelemeden bu yana kapananlara bakiliyor (10 dk payla).
+// Saat kaymasi ya da gecikmeli kapanislari kacirmamak icin 6 saatte bir
+// tam pencere taramasi yine yapiliyor. Bu liste turda ~3 sayfa / 1.400 satir
+// idi; GET /orders gunde 5.900'e cikiyordu.
+const DONE_LIST_FULL_MS    = 6 * 3600_000
+const DONE_LIST_OVERLAP_MS = 10 * 60_000
+let lastDoneListAt     = 0
+let lastFullDoneListAt = 0
+
+// tables.status'u en son ne olarak gonderdik — ayni degeri tekrar tekrar
+// PATCH'lememek icin. Her aktif siparis push'unda fire-and-forget gidiyordu
+// (gunde ~145 gereksiz PATCH).
+const lastTableStatusSent = new Map()
 
 // .in(...) filtresi sorgu dizesine giriyor; binlerce id URL'i uzunluk
 // sınırının ötesine taşırıp isteği komple düşürür. Parçalayarak gönderiyoruz.
@@ -93,6 +117,7 @@ export async function syncToSupabase(log = null) {
   const err = (msg, e) => {
     console.error(msg, fmtErr(e), e)
     noteWriteRejected(e, msg)
+    noteServerError(e)
     log?.('error',  `${msg} — ${fmtErr(e)}`)
   }
 
@@ -516,13 +541,19 @@ export async function syncToSupabase(log = null) {
 
     if (!error && data) {
       await markOrderSynced(id, data.id)
+      notePushed('orders', data.id)
       synced.orders++
       ok(`[Sync] ✓ Sipariş: ₺${total} | ${payment_method} | ${status} (remote:${data.id})`)
-      if (status === 'active' && table_id != null) {
+      if (status === 'active' && table_id != null && lastTableStatusSent.get(table_id) !== 'occupied') {
         // Fire-and-forget — a table just gained an active order, flip it to
         // occupied on Supabase without blocking the rest of the push queue.
+        lastTableStatusSent.set(table_id, 'occupied')
         void supabase.from('tables').update({ status: 'occupied' }).eq('id', table_id)
-          .then(() => {}).catch(() => {})
+          .then(() => {}).catch(() => { lastTableStatusSent.delete(table_id) })
+      } else if (status !== 'active' && table_id != null) {
+        // Masa baska bir yoldan bosaltilmis olabilir; bir sonraki aktif
+        // sipariste PATCH tekrar gitsin.
+        lastTableStatusSent.delete(table_id)
       }
     } else if (error) {
       err('[Sync] ✗ Sipariş yüklenemedi', error)
@@ -568,6 +599,7 @@ export async function syncToSupabase(log = null) {
 
     if (!error && data) {
       await setOrderItemRemoteId(id, data.id)
+      notePushed('order_items', data.id)
       synced.orderItems++
       ok(`[Sync] ✓ Sipariş kalemi: ${quantity}× ₺${unit_price}${note ? ' (' + note + ')' : ''} → sipariş:${order_remote_id} (remote:${data.id})`)
     } else if (error) {
@@ -627,6 +659,7 @@ export async function syncToSupabase(log = null) {
       .single()
     if (!error && data) {
       await markPaymentSynced(id, data.id)
+      notePushed('payments', data.id)
       synced.payments++
       ok(`[Sync] ✓ Ödeme: ₺${amount} ${payment_method} → sipariş:${order_remote_id} (remote:${data.id})`)
     } else if (error) {
@@ -671,6 +704,9 @@ export async function syncToSupabase(log = null) {
       .upsert(junctionPayload, { onConflict: 'order_item_id', ignoreDuplicates: true })
     if (!error) {
       for (const pid of junctionIds) await markPaymentItemSynced(pid)
+      // payment_items'in uzak id'sini bilmiyoruz (upsert select'siz); realtime
+      // olayindaki order_item_id ile eslestiriyoruz.
+      for (const j of junctionPayload) notePushed('payment_items', j.order_item_id)
       synced.paymentItems += junctionPayload.length
       ok(`[Sync] ✓ Ödeme-kalem eşleşmesi: ${junctionPayload.length} satır`)
     } else {
@@ -704,11 +740,16 @@ export async function syncToSupabase(log = null) {
   return synced
 }
 
-export async function pullFromSupabase(log = null) {
+// opts.catalog: true → katalogu her durumda cek (acilis, elle senkron).
+// Verilmezse CATALOG_PULL_MS dolduysa cekilir, dolmadiysa atlanir.
+export async function pullFromSupabase(log = null, opts = {}) {
+  const pullCatalog = opts.catalog === true || Date.now() - lastCatalogPullAt >= CATALOG_PULL_MS
+  let catalogFailed = false
+
   // ── Gün bitirme kayıtları ─────────────────────────────────────
   // Başka bir cihazda ya da yeniden kurulumdan önce atılmış kapanışları geri
   // getirir; local_id ile tekilleştirildiği için tekrar çalışmak zararsız.
-  try {
+  if (pullCatalog) try {
     const { data: closures, error: clErr } = await supabase
       .from('day_closures')
       .select('id, local_id, closed_at, closed_by')
@@ -731,7 +772,13 @@ export async function pullFromSupabase(log = null) {
   }
 
   const ok  = (msg) => { console.log(msg);        log?.('success', msg) }
-  const err = (msg, e) => { console.error(msg, fmtErr(e), e); log?.('error',  `${msg} — ${fmtErr(e)}`) }
+  let pullErrors = 0
+  const err = (msg, e) => {
+    pullErrors++
+    console.error(msg, fmtErr(e), e)
+    noteServerError(e)
+    log?.('error',  `${msg} — ${fmtErr(e)}`)
+  }
 
   if (!isSupabaseReady) {
     log?.('info', '[Sync] Supabase yapılandırılmamış — çekme atlandı')
@@ -743,151 +790,163 @@ export async function pullFromSupabase(log = null) {
   const pendingProdIds = new Set(pendingDeletes.filter(p => p.entity_type === 'product').map(p => p.remote_id))
   const pendingIngIds  = new Set(pendingDeletes.filter(p => p.entity_type === 'ingredient').map(p => p.remote_id))
 
-  // ── Pull categories ────────────────────────────────────────────
-  const { data: cats, error: catErr } = await supabase
-    .from('categories')
-    .select('id, name, color, icon, image_url')
+  // Katalog (bkz. CATALOG_PULL_MS). Atlanan turda hicbir katalog istegi
+  // gitmiyor; resim on-bellek isitma cagrilari da onunla birlikte atlaniyor.
+  const hataKatalogOncesi = pullErrors
+  if (pullCatalog) {
+    // ── Pull categories ────────────────────────────────────────────
+    const { data: cats, error: catErr } = await supabase
+      .from('categories')
+      .select('id, name, color, icon, image_url')
 
-  if (catErr) {
-    err('[Sync] ✗ Kategoriler çekilemedi', catErr)
-  } else if (cats) {
-    for (const c of cats) {
-      if (pendingCatIds.has(c.id)) continue
-      await upsertCategoryFromRemote({ remoteId: c.id, name: c.name, color: c.color, icon: c.icon, imageUrl: c.image_url ?? null })
+    if (catErr) {
+      err('[Sync] ✗ Kategoriler çekilemedi', catErr)
+    } else if (cats) {
+      for (const c of cats) {
+        if (pendingCatIds.has(c.id)) continue
+        await upsertCategoryFromRemote({ remoteId: c.id, name: c.name, color: c.color, icon: c.icon, imageUrl: c.image_url ?? null })
+      }
+      const gone = reconcileRemoteDeletions('category', cats.map(c => c.id))
+      if (gone) ok(`[Sync] ↓ ${gone} kategori uzakta silinmişti — lokalden kaldırıldı`)
+      await persistDb()
+      ok(`[Sync] ↓ ${cats.length} kategori çekildi`)
+      // Warm the offline image cache in the background (fire-and-forget)
+      for (const c of cats) {
+        if (c.image_url?.startsWith('http')) window.electronAPI?.images?.cacheRemote(c.image_url)
+      }
     }
-    const gone = reconcileRemoteDeletions('category', cats.map(c => c.id))
-    if (gone) ok(`[Sync] ↓ ${gone} kategori uzakta silinmişti — lokalden kaldırıldı`)
-    await persistDb()
-    ok(`[Sync] ↓ ${cats.length} kategori çekildi`)
-    // Warm the offline image cache in the background (fire-and-forget)
-    for (const c of cats) {
-      if (c.image_url?.startsWith('http')) window.electronAPI?.images?.cacheRemote(c.image_url)
+
+    // ── Pull ingredients ───────────────────────────────────────────
+    const { data: ings, error: ingErr } = await supabase
+      .from('ingredients')
+      .select('id, name, unit, stock_amount, min_stock_alert')
+
+    if (ingErr) {
+      err('[Sync] ✗ Malzemeler çekilemedi', ingErr)
+    } else if (ings) {
+      for (const ing of ings) {
+        if (pendingIngIds.has(ing.id)) continue
+        await upsertIngredientFromRemote({
+          remoteId:      ing.id,
+          name:          ing.name,
+          unit:          ing.unit,
+          stockAmount:   ing.stock_amount,
+          minStockAlert: ing.min_stock_alert,
+        })
+      }
+      const gone = reconcileRemoteDeletions('ingredient', ings.map(i => i.id))
+      if (gone) ok(`[Sync] ↓ ${gone} malzeme uzakta silinmişti — lokalden kaldırıldı`)
+      await persistDb()
+      ok(`[Sync] ↓ ${ings.length} malzeme çekildi`)
+    }
+
+    // ── Pull products ──────────────────────────────────────────────
+    const { data: prods, error: prodErr } = await supabase
+      .from('products')
+      .select('id, name, price, stock, category_id, image_url, points_value')
+      .eq('is_active', true)
+
+    if (prodErr) {
+      err('[Sync] ✗ Ürünler çekilemedi', prodErr)
+    } else if (prods) {
+      for (const p of prods) {
+        if (pendingProdIds.has(p.id)) continue
+        await upsertProductFromRemote({
+          remoteId: p.id,
+          name: p.name,
+          price: p.price,
+          stock: p.stock,
+          remoteCatId: p.category_id,
+          imageUrl: p.image_url,
+          pointsValue: p.points_value ?? 0,
+        })
+      }
+      // Also removes products deactivated remotely (pull filters is_active=true)
+      const gone = reconcileRemoteDeletions('product', prods.map(p => p.id))
+      if (gone) ok(`[Sync] ↓ ${gone} ürün uzakta silinmişti — lokalden kaldırıldı`)
+      await persistDb()
+      ok(`[Sync] ↓ ${prods.length} ürün çekildi`)
+      // Warm the offline image cache in the background (fire-and-forget)
+      for (const p of prods) {
+        if (p.image_url?.startsWith('http')) window.electronAPI?.images?.cacheRemote(p.image_url)
+      }
+    }
+
+    // ── Pull product variants ──────────────────────────────────────
+    // Must run after products (parent FK) and before modifiers so a fresh
+    // install receives the full menu incl. variant pricing in one pass.
+    const pendingVarIds = new Set(pendingDeletes.filter(p => p.entity_type === 'variant').map(p => p.remote_id))
+    const { data: vars, error: varErr } = await supabase
+      .from('product_variants')
+      .select('id, local_id, product_id, name, price')
+    if (varErr) {
+      err('[Sync] ✗ Varyantlar çekilemedi', varErr)
+    } else if (vars) {
+      let pulled = 0
+      for (const v of vars) {
+        if (pendingVarIds.has(v.id)) continue
+        const done = await upsertVariantFromRemote({
+          remoteId: v.id,
+          remoteProductId: v.product_id,
+          localId: v.local_id,
+          name: v.name,
+          price: v.price,
+        })
+        if (done) pulled++
+      }
+      const gone = reconcileRemoteDeletions('variant', vars.map(v => v.id))
+      if (gone) ok(`[Sync] ↓ ${gone} varyant uzakta silinmişti — lokalden kaldırıldı`)
+      await persistDb()
+      ok(`[Sync] ↓ ${pulled}/${vars.length} varyant çekildi`)
+    }
+
+    // ── Pull modifiers ─────────────────────────────────────────────
+    const { data: mods, error: modErr } = await supabase
+      .from('modifiers')
+      .select('id, category_id, product_id, name, price_delta, sort_order, is_active')
+    if (modErr) {
+      err('[Sync] ✗ Modifier\'lar çekilemedi', modErr)
+    } else if (mods) {
+      for (const m of mods) {
+        await upsertModifierFromRemote({
+          remoteId: m.id,
+          remoteCategoryId: m.category_id,
+          remoteProductId: m.product_id,
+          name: m.name,
+          priceDelta: m.price_delta,
+          sortOrder: m.sort_order ?? 0,
+          isActive: m.is_active !== false,
+        })
+      }
+      const gone = reconcileRemoteDeletions('modifier', mods.map(m => m.id))
+      if (gone) ok(`[Sync] ↓ ${gone} modifier uzakta silinmişti — lokalden kaldırıldı`)
+      await persistDb()
+      ok(`[Sync] ↓ ${mods.length} modifier çekildi`)
+    }
+
+    // ── Pull product modifier excludes ─────────────────────────────
+    const { data: exs, error: exErr } = await supabase
+      .from('product_modifier_excludes')
+      .select('product_id, modifier_id')
+    if (exErr) {
+      err('[Sync] ✗ Modifier-exclude çekilemedi', exErr)
+    } else if (exs) {
+      for (const e of exs) {
+        await upsertProductModifierExcludeFromRemote({
+          remoteProductId: e.product_id,
+          remoteModifierId: e.modifier_id,
+        })
+      }
+      await persistDb()
+      ok(`[Sync] ↓ ${exs.length} modifier-exclude çekildi`)
     }
   }
 
-  // ── Pull ingredients ───────────────────────────────────────────
-  const { data: ings, error: ingErr } = await supabase
-    .from('ingredients')
-    .select('id, name, unit, stock_amount, min_stock_alert')
-
-  if (ingErr) {
-    err('[Sync] ✗ Malzemeler çekilemedi', ingErr)
-  } else if (ings) {
-    for (const ing of ings) {
-      if (pendingIngIds.has(ing.id)) continue
-      await upsertIngredientFromRemote({
-        remoteId:      ing.id,
-        name:          ing.name,
-        unit:          ing.unit,
-        stockAmount:   ing.stock_amount,
-        minStockAlert: ing.min_stock_alert,
-      })
-    }
-    const gone = reconcileRemoteDeletions('ingredient', ings.map(i => i.id))
-    if (gone) ok(`[Sync] ↓ ${gone} malzeme uzakta silinmişti — lokalden kaldırıldı`)
-    await persistDb()
-    ok(`[Sync] ↓ ${ings.length} malzeme çekildi`)
-  }
-
-  // ── Pull products ──────────────────────────────────────────────
-  const { data: prods, error: prodErr } = await supabase
-    .from('products')
-    .select('id, name, price, stock, category_id, image_url, points_value')
-    .eq('is_active', true)
-
-  if (prodErr) {
-    err('[Sync] ✗ Ürünler çekilemedi', prodErr)
-  } else if (prods) {
-    for (const p of prods) {
-      if (pendingProdIds.has(p.id)) continue
-      await upsertProductFromRemote({
-        remoteId: p.id,
-        name: p.name,
-        price: p.price,
-        stock: p.stock,
-        remoteCatId: p.category_id,
-        imageUrl: p.image_url,
-        pointsValue: p.points_value ?? 0,
-      })
-    }
-    // Also removes products deactivated remotely (pull filters is_active=true)
-    const gone = reconcileRemoteDeletions('product', prods.map(p => p.id))
-    if (gone) ok(`[Sync] ↓ ${gone} ürün uzakta silinmişti — lokalden kaldırıldı`)
-    await persistDb()
-    ok(`[Sync] ↓ ${prods.length} ürün çekildi`)
-    // Warm the offline image cache in the background (fire-and-forget)
-    for (const p of prods) {
-      if (p.image_url?.startsWith('http')) window.electronAPI?.images?.cacheRemote(p.image_url)
-    }
-  }
-
-  // ── Pull product variants ──────────────────────────────────────
-  // Must run after products (parent FK) and before modifiers so a fresh
-  // install receives the full menu incl. variant pricing in one pass.
-  const pendingVarIds = new Set(pendingDeletes.filter(p => p.entity_type === 'variant').map(p => p.remote_id))
-  const { data: vars, error: varErr } = await supabase
-    .from('product_variants')
-    .select('id, local_id, product_id, name, price')
-  if (varErr) {
-    err('[Sync] ✗ Varyantlar çekilemedi', varErr)
-  } else if (vars) {
-    let pulled = 0
-    for (const v of vars) {
-      if (pendingVarIds.has(v.id)) continue
-      const done = await upsertVariantFromRemote({
-        remoteId: v.id,
-        remoteProductId: v.product_id,
-        localId: v.local_id,
-        name: v.name,
-        price: v.price,
-      })
-      if (done) pulled++
-    }
-    const gone = reconcileRemoteDeletions('variant', vars.map(v => v.id))
-    if (gone) ok(`[Sync] ↓ ${gone} varyant uzakta silinmişti — lokalden kaldırıldı`)
-    await persistDb()
-    ok(`[Sync] ↓ ${pulled}/${vars.length} varyant çekildi`)
-  }
-
-  // ── Pull modifiers ─────────────────────────────────────────────
-  const { data: mods, error: modErr } = await supabase
-    .from('modifiers')
-    .select('id, category_id, product_id, name, price_delta, sort_order, is_active')
-  if (modErr) {
-    err('[Sync] ✗ Modifier\'lar çekilemedi', modErr)
-  } else if (mods) {
-    for (const m of mods) {
-      await upsertModifierFromRemote({
-        remoteId: m.id,
-        remoteCategoryId: m.category_id,
-        remoteProductId: m.product_id,
-        name: m.name,
-        priceDelta: m.price_delta,
-        sortOrder: m.sort_order ?? 0,
-        isActive: m.is_active !== false,
-      })
-    }
-    const gone = reconcileRemoteDeletions('modifier', mods.map(m => m.id))
-    if (gone) ok(`[Sync] ↓ ${gone} modifier uzakta silinmişti — lokalden kaldırıldı`)
-    await persistDb()
-    ok(`[Sync] ↓ ${mods.length} modifier çekildi`)
-  }
-
-  // ── Pull product modifier excludes ─────────────────────────────
-  const { data: exs, error: exErr } = await supabase
-    .from('product_modifier_excludes')
-    .select('product_id, modifier_id')
-  if (exErr) {
-    err('[Sync] ✗ Modifier-exclude çekilemedi', exErr)
-  } else if (exs) {
-    for (const e of exs) {
-      await upsertProductModifierExcludeFromRemote({
-        remoteProductId: e.product_id,
-        remoteModifierId: e.modifier_id,
-      })
-    }
-    await persistDb()
-    ok(`[Sync] ↓ ${exs.length} modifier-exclude çekildi`)
+  if (pullCatalog) {
+    catalogFailed = pullErrors > hataKatalogOncesi
+    // Basarisiz bir katalog turu "cekildi" sayilmasin — bir sonraki turda
+    // yeniden denensin.
+    if (!catalogFailed) lastCatalogPullAt = Date.now()
   }
 
   // ── Pull payments + order status for active shared orders ──────
@@ -1079,9 +1138,17 @@ export async function pullFromSupabase(log = null) {
   // tam olarak indirilir; böylece her turda tüm geçmiş yeniden çekilmez.
   // Geri dolum yapılmadıysa tarih sınırı UYGULANMAZ — geçmişin tamamı gelir.
   const needsBackfill = getMeta(COMPLETED_BACKFILL_KEY) !== '1'
+  const turBasi = Date.now()
+  // Tam pencere: geri dolum gerekiyorsa, uygulama yeni acildiysa ya da son
+  // tam taramanin uzerinden DONE_LIST_FULL_MS gectiyse. Aksi halde yalnizca
+  // son listelemeden bu yana kapananlar (bkz. DONE_LIST_OVERLAP_MS).
+  const tamTarama = needsBackfill || !lastDoneListAt || !lastFullDoneListAt
+    || turBasi - lastFullDoneListAt >= DONE_LIST_FULL_MS
   const since = needsBackfill
     ? null
-    : new Date(Date.now() - COMPLETED_PULL_WINDOW_DAYS * 86400_000).toISOString()
+    : tamTarama
+      ? new Date(turBasi - COMPLETED_PULL_WINDOW_DAYS * 86400_000).toISOString()
+      : new Date(lastDoneListAt - DONE_LIST_OVERLAP_MS).toISOString()
   if (needsBackfill) ok('[Sync] ↓ İlk kurulum/kurtarma — kapanmış satışların tamamı çekiliyor')
 
   // Sayfa sayfa id listesi. Sıralama olmadan range() tutarsız sonuç verir.
@@ -1181,6 +1248,13 @@ export async function pullFromSupabase(log = null) {
     }
 
     if (added > 0) ok(`[Sync] ↓ ${added} kapanan satış çekildi (diğer cihazlardan)`)
+
+    // Zaman damgasi YALNIZCA liste ve ayrintilar eksiksiz geldiyse ilerler;
+    // yarim kalan bir tur bir sonrakinde ayni araligi yeniden tarar.
+    if (!detailFailed) {
+      lastDoneListAt = turBasi
+      if (tamTarama) lastFullDoneListAt = turBasi
+    }
 
     // Bayrak YALNIZCA liste ve ayrıntı çekimlerinin ikisi de eksiksiz
     // tamamlandıysa yazılır. Yarım kalmış bir geri dolumu "tamam" işaretlemek,

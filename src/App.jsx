@@ -38,7 +38,7 @@ function RequireP({ permKey, children }) {
 
 function AppShell() {
   const { dbReady, dbError, dbRecoveryWarning, dbWriteWarning, triggerSync,
-          syncStuck, authFailure, logoutUser } = useApp()
+          syncStuck, authFailure, logoutUser, serverDown } = useApp()
   const { isOnline } = useOnlineStatus({ onReconnect: triggerSync })
 
   // Sync once on startup if online and DB is ready
@@ -93,6 +93,16 @@ function AppShell() {
                 Çıkış yap
               </button>
             )}
+          </div>
+        )}
+        {/* Sunucu ulaşılamıyor (kota kilidi / sunucu hatası / ağ). Kasiyeri
+            korkutmamalı: satış yerelde sorunsuz devam ediyor. Bilmesi gereken
+            tek şey QR siparişlerinin gelmediği ve kayıtların sonra gideceği. */}
+        {serverDown && isOnline && (
+          <div className="offline-banner">
+            <span className="offline-banner__dot" />
+            Sunucuya şu an ulaşılamıyor — kasa yerelde çalışmaya devam ediyor, satışlarınız
+            kaydediliyor. QR menüden sipariş gelmez; sunucu döndüğünde kayıtlar otomatik gönderilecek.
           </div>
         )}
         {/* Kuyruk tıkanması: bir yazma kalıcı olarak gönderilemiyorsa
