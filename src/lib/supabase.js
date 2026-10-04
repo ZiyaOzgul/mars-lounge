@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
+import { compressToWebp, contentTypeForName, IMAGE_PROFILES } from './imageCompress.js'
 
 const url        = import.meta.env.VITE_SUPABASE_URL
 const key        = import.meta.env.VITE_SUPABASE_ANON_KEY
@@ -94,25 +95,46 @@ export async function deleteProductImage(filename) {
   if (error) console.error('[Supabase] ✗ Failed to delete image', error)
 }
 
-export async function uploadProductImage(bytes, filename) {
+// Dosya adlari zaman damgali ve her yuklemede yeni — ayni adres asla farkli
+// icerik gostermiyor, bu yuzden 1 yillik onbellek guvenli. Eskiden hic
+// cacheControl verilmiyordu (varsayilan 1 saat): telefonlar ve Netlify'in
+// resim CDN'i ayni dosyayi tekrar tekrar indiriyordu.
+const IMAGE_CACHE_CONTROL = '31536000'
+
+// Yuklemeden once WebP'ye cevirip kucultur (bkz. imageCompress.js).
+// Donusturme basarisiz olursa ya da kazanc yoksa orijinal, DOGRU turle
+// yuklenir — resim yuklemesi bu yuzden asla basarisiz olmamali.
+async function uploadMenuImage(bucket, profile, bytes, filename) {
   if (!supabase) throw new Error('Supabase not configured')
-  const { error } = await supabase.storage
-    .from('product-images')
-    .upload(filename, new Blob([bytes]), { upsert: true })
+  let body = new Blob([bytes], { type: contentTypeForName(filename) })
+  let name = filename
+  try {
+    const out = await compressToWebp(bytes, profile)
+    if (out) {
+      body = out.blob
+      name = filename.replace(/\.[^.]+$/, '') + '.webp'
+      console.log(`[Supabase] görsel sıkıştırıldı: ${filename} ${(bytes.byteLength / 1024).toFixed(0)} KB → ${name} ${(out.blob.size / 1024).toFixed(0)} KB (${out.width}×${out.height})`)
+    }
+  } catch (e) {
+    console.warn('[Supabase] görsel sıkıştırılamadı, orijinal yükleniyor', filename, e)
+  }
+  const { error } = await supabase.storage.from(bucket).upload(name, body, {
+    upsert: true,
+    contentType: body.type || contentTypeForName(name),
+    cacheControl: IMAGE_CACHE_CONTROL,
+  })
   if (error) throw error
-  const { data } = supabase.storage.from('product-images').getPublicUrl(filename)
+  const { data } = supabase.storage.from(bucket).getPublicUrl(name)
   return data.publicUrl
 }
 
+export async function uploadProductImage(bytes, filename) {
+  return uploadMenuImage('product-images', IMAGE_PROFILES.product, bytes, filename)
+}
+
 export async function uploadCategoryImage(bytes, filename) {
-  // Storage RLS politikaları category-images'i de kapsıyor — anon+auth yeterli
-  if (!supabase) throw new Error('Supabase not configured')
-  const { error } = await supabase.storage
-    .from('category-images')
-    .upload(filename, new Blob([bytes]), { upsert: true })
-  if (error) throw error
-  const { data } = supabase.storage.from('category-images').getPublicUrl(filename)
-  return data.publicUrl
+  // Storage yazma politikalari authenticated ister (anon yazamaz).
+  return uploadMenuImage('category-images', IMAGE_PROFILES.category, bytes, filename)
 }
 
 export async function resetSupabaseData() {
