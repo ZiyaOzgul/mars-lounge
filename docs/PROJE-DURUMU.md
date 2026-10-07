@@ -380,7 +380,23 @@ açıldı → ~her ayın 8'i) ya da Pro'ya geçilene kadar sürüyor.
 atlıyor, her müşteri 10 adet ~2 MB PNG indiriyor. Ürün resimlerinin
 orijinalleri de Netlify ImageCDN tarafından tekrar tekrar çekiliyor. Yüklenen
 dosyalarda `Cache-Control` yok. Günde ~180 MB → bir ayda 5-8 GB.
-**(Düzeltilmedi — resimlerin sıkıştırılması kilit kalkınca yapılacak.)**
+**4 Ekim 2026'da düzeltildi** (kilit kalktıktan sonra, organizasyon Pro plana geçti):
+  * 70 orijinal yedeklendi: `D:\code\Mars Lounge\yedek\storage-2026-10-04\orijinal\`
+    (boyutlar storage kaydıyla birebir doğrulandı)
+  * WebP'ye çevrildi — kategori 800 px q95, ürün 1200 px q90 (menüdeki gerçek
+    gösterime göre). 54,3 MB → 12,9 MB. Ölçülen PSNR en düşük 35,3 dB;
+    düşük skorlar yoğun damla/doku içeren fotoğraflardan, görsel karşılaştırmada
+    fark yok. Orijinalden büyük çıkan 1 küçük JPEG olduğu gibi bırakıldı.
+  * Yeni dosyalar YENİ adla yüklendi (`.webp`), orijinallerin üstüne yazılmadı;
+    eski adresi kullanan bir istemci kalırsa resmi yine görür. Veritabanı
+    adresleri ancak dosya herkese açık adresten doğrulandıktan sonra
+    güncellendi; geri alma komutları `yedek/storage-2026-10-04/geri-al.sql`.
+  * QR menü (`mars-lounge-web`): kategori kutucukları `next/image` ile.
+  * Masaüstü (v1.8.4): `src/lib/imageCompress.js` — yeni yüklenen resimler
+    yüklemeden önce aynı profillerle WebP'ye çevriliyor (Chromium canvas,
+    yeni bağımlılık yok). Doğru `contentType` ve 1 yıllık `cacheControl`
+    veriliyor; eskiden storage'daki dosyaların hepsi `application/octet-stream`
+    görünüyordu ve önbellek süresi varsayılan 1 saatti.
 
 **Log kotasını masaüstü doldurdu:** günde 16.896 isteğin %92'si.
   * Her senkron turunda tüm katalog yeniden çekiliyordu (7 tablo × ~1.100/gün)
@@ -417,6 +433,50 @@ kullanılamaz hale geldi.
 **Kural: sunucu ne yaparsa yapsın, bu cihazda daha önce giriş yapmış
 personel satışa devam edebilmeli.** Kimlik doğrulama hatası (yanlış şifre)
 ile sunucu hatası (402, 5xx, ağ) ASLA aynı muameleyi görmemeli.
+
+### 1.8.4 sonrası bildirilen üç sorun (7 Ekim 2026)
+
+Kullanıcı "1.8.4'ten sonra başladı" dedi. Üçü de test edilerek doğrulandı;
+ikisinin 1.8.4'ün koduyla ilgisi yok, zamanlama tesadüfü:
+
+**1. Oralet'e varyant seçince eklenemiyor ("ekstra yok" uyarısı).**
+Varyant listesinin kaydırması yoktu, flex öğeleri `min-height: auto`
+yüzünden küçülemiyordu. ORALET'e 6 Ekim'de (1.8.4 kurulumundan ~1 saat sonra)
+4 varyant eklenip sayı 11'e çıkınca 1366×768 ekranda "Ekle" butonu
+917–962 px'e (ekranın altına) itildi; kasiyerin gördüğü son şey "Bu ürün için
+tanımlı ekstra yok" kutusuydu. Ölçüldü: 5 varyantla buton 635–680 px'te,
+11'le ekran dışında. Düzeltme: varyantlar iki sütun, listeler kendi içinde
+kayıyor, başlık/adet/buton sabit; varyantlı ürünlerde "ekstra yok" kutusu
+gizli. 1024×600'den 1920×1080'e kadar, 30 varyantta bile buton ekranda.
+
+**2. "Masayı Kapat" bazen "İşleniyor"da takılıyor.**
+Kapatma akışı ödemeyi yerele yazdıktan SONRA Supabase isteklerini `await`
+ediyordu (`addPayments` adım 3–4, masayı boşaltma). İnternet "bağlı ama
+çalışmıyor"ken (modem WAN'ı düşük, Wi-Fi bağlı) fetch'in zaman aşımı yok,
+istek süresiz asılı kalıyor. 6–7 Ekim gecesi masaüstü TR 00:45 → 12:38
+arası sunucuya hiç ulaşamadı. Eski kodla yeniden üretildi: 30 sn sonra ödeme
+adımı hâlâ bitmemiş. Düzeltme: yerel kayıt anında biter, uzak gönderim arka
+planda ve 10 sn zaman aşımlı (sync.js zaten tekrar dener). Ölçüldü: aynı
+koşulda masa 2 ms'de kapanıyor.
+
+**3. Kapanan masa geri geliyor, "ödendi" göründüğü için kapanmıyor.**
+2'nin devamı: "İşleniyor"da bekleyen kasiyer uygulamayı yenileyince işlem
+yarıda kalıyordu — ödeme YAZILMIŞ, sipariş KAPANMAMIŞ. Masa geri geliyor;
+kalan 0 olduğu için ödeme ekranındaki `canComplete` (`commitAmount > 0`)
+butonu KALICI kilitliyordu. Canlıda örnek: #2662 (Masa-1, ₺300, nakit
+ödendi, sunucuda açık). #2447 (30 Eylül, 1.8.2) aynı durumda — yani hata
+1.8.4'ten eski. Düzeltme: tamamen ödenmiş açık masa "Masayı Kapat" ile yeni
+tahsilat yapılmadan kapatılabiliyor.
+
+**Ek: eşzamanlı senkron turları (benim 1.8.2 hatam).** `triggerSync`
+kilidi `await ensureSession()`'dan SONRA kapatıyordu; o beklerken gelen
+ikinci istek ikinci bir tur başlatıyordu. Loglarda #2662 ve #2663 4 ms
+arayla ikişer kez PATCH'lenmişti. Kilit artık ilk iş kapanıyor.
+
+**Kural: kasiyerin beklediği yolda ağ isteği `await` edilmez.** Yerel kayıt
+bitince ekran kapanır; sunucu arka planda, zaman aşımıyla. Bir ağ isteğinin
+sonucuna gerçekten bağlıysa (hızlı yoldaki uzak kapatma gibi) mutlaka
+`abortSignal(AbortSignal.timeout(...))`.
 
 ### Açık kalan mimari soru: kaynak Supabase mi olmalı
 

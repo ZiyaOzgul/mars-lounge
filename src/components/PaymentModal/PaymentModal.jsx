@@ -5,7 +5,7 @@ import { useApp } from '../../context/AppContext.jsx'
 import DiscountEditor from '../shared/DiscountEditor.jsx'
 import { hasPerm } from '../../lib/permissions.js'
 import { buildDisplayRows } from '../../lib/itemGrouping.js'
-import { isFullyPaid, isOverpaid, remainingOf } from '../../lib/money.js'
+import { isFullyPaid, isOverpaid, remainingOf, PAYMENT_TOLERANCE } from '../../lib/money.js'
 import './PaymentModal.css'
 
 const MODES = [
@@ -331,9 +331,18 @@ function PaymentModal({
   const [closeWithRemainder, setCloseWithRemainder] = useState(false)
   const willClose = isFullPayment || (remainingAfterCommit > 0 && closeWithRemainder)
   if (closeWithRemainder && remainingAfterCommit === 0) setCloseWithRemainder(false)
-  const canComplete = !commitOverflow && commitAmount > 0 && (
+  // FIX (7 Ekim 2026) — odemesi DAHA ONCE tamamen alinmis ama acik kalmis
+  // masa. Kapatma islemi odemeyi yazdiktan sonra yarida kesilirse (ag
+  // takildi, kasiyer uygulamayi yeniledi) masa "odendi" olarak geri
+  // geliyordu. Kalan 0 oldugu icin tahsil edilecek tutar da 0'di ve
+  // asagidaki kosul (commitAmount > 0) butonu KALICI olarak kilitliyordu:
+  // odenmis bir masayi kapatmanin hicbir yolu yoktu. Simdi yeni tahsilat
+  // yapmadan kapatilabiliyor. Yeni bir tutar girildiyse (fazla odeme) bu
+  // yol devreye girmez.
+  const sadeceKapat = paidSoFar > 0 && total <= PAYMENT_TOLERANCE && commitAmount === 0
+  const canComplete = sadeceKapat || (!commitOverflow && commitAmount > 0 && (
     selectionActive || mode !== 'single' || singleMethod !== 'cash' || enteredAmount >= payableTotal
-  ) && (!hasVeresiye || trimmedVeresiyeName.length > 0)
+  ) && (!hasVeresiye || trimmedVeresiyeName.length > 0))
 
   // ── Handlers ───────────────────────────────────────────────────
   const handleNumpad = (key) => {
@@ -1019,6 +1028,17 @@ function PaymentModal({
               </label>
             )}
 
+            {sadeceKapat && (
+              <div className="pm-remainder">
+                <span className="pm-remainder__text">
+                  <span><strong>Bu masanın ödemesi daha önce alınmış.</strong></span>
+                  <span className="pm-remainder__hint">
+                    Yeni tahsilat yapılmadan kapatılacak — aynı tutarı tekrar almayın.
+                  </span>
+                </span>
+              </div>
+            )}
+
             {/* Commit summary */}
             <div className="pm-commit-summary">
               <span>TAHSİL EDİLECEK</span>
@@ -1032,7 +1052,7 @@ function PaymentModal({
               onClick={handleComplete}
               disabled={!canComplete || submitting}
             >
-              {submitting ? 'İşleniyor…' : (willClose ? 'Tahsil & Kapat' : 'Tahsil Et')}
+              {submitting ? 'İşleniyor…' : (sadeceKapat ? 'Masayı Kapat' : (willClose ? 'Tahsil & Kapat' : 'Tahsil Et'))}
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                 <line x1="5" y1="12" x2="19" y2="12" />
                 <polyline points="12 5 19 12 12 19" />

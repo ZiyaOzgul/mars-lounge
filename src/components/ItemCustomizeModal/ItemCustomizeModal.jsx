@@ -142,10 +142,16 @@ function ItemCustomizeModal({
         )}
 
         {effective.length === 0 ? (
-          <div className="icm-empty">
-            Bu ürün için tanımlı ekstra yok.
-            <div className="icm-empty__hint">Ayarlar → Kategoriler ekranından ekstra tanımlayabilirsiniz.</div>
-          </div>
+          // Varyantli urunde bu kutu gosterilmiyor: hem yer kapliyordu hem de
+          // kasiyer onu bir HATA uyarisi saniyordu — ORALET'te "Ekle" butonu
+          // ekranin disina itildiginde gorebildigi son sey bu yaziydi ve
+          // "ekstra yok uyarisi yuzunden ekleyemiyorum" diye bildirildi.
+          hasVariants ? null : (
+            <div className="icm-empty">
+              Bu ürün için tanımlı ekstra yok.
+              <div className="icm-empty__hint">Ayarlar → Kategoriler ekranından ekstra tanımlayabilirsiniz.</div>
+            </div>
+          )
         ) : (
           <div className="icm-list">
             {effective.map(m => {

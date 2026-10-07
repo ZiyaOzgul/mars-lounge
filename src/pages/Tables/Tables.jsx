@@ -34,6 +34,36 @@ const PENDING_SWEEP_MS = 45_000
 // Son gün bitirmeden bu kadar saat geçtiyse bilgilendirme gösterilir.
 const CLOSURE_REMINDER_HOURS = 24
 
+// Kapatma akisinda kasiyeri bekletebilecek uzak istekler icin ust sinir.
+// Internet "bagli ama calismiyor" durumundayken (modem WAN'i dustu, Wi-Fi
+// bagli) fetch dakikalarca asili kalabiliyor; odeme ekrani "Isleniyor"da
+// takiliyordu (bkz. orderOperations.js addPayments notu).
+const REMOTE_TIMEOUT_MS = 10_000
+
+// Masa kapandi — sunucuda baska aktif siparis yoksa masayi bosalt.
+// ARKA PLANDA calisir, kasiyeri beklemez; basarisizlik yalnizca loglanir
+// (masanin sunucudaki doluluk bayragi yalnizca bilgi amacli).
+// closedRemoteIds: az once kapatilan siparisler. Onlarin "tamamlandi"
+// durumu sunucuya henuz ulasmamis olabilir; sayima katilmazlar.
+function freeTableRemotely(tableId, closedRemoteIds = []) {
+  if (!isSupabaseReady) return
+  void (async () => {
+    try {
+      let q = supabase.from('orders').select('id').eq('table_id', tableId).eq('status', 'active')
+      const ids = closedRemoteIds.filter(id => id != null).map(Number)
+      if (ids.length) q = q.not('id', 'in', `(${ids.join(',')})`)
+      const { data: rem, error } = await q.limit(1).abortSignal(AbortSignal.timeout(REMOTE_TIMEOUT_MS))
+      if (error) throw error
+      if (!rem?.length) {
+        await supabase.from('tables').update({ status: 'empty' }).eq('id', tableId)
+          .abortSignal(AbortSignal.timeout(REMOTE_TIMEOUT_MS))
+      }
+    } catch (e) {
+      console.warn('[Tables] masa durumu sunucuda güncellenemedi (kasiyeri etkilemez)', e)
+    }
+  })()
+}
+
 function getLiveTime() {
   return new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })
 }
@@ -999,9 +1029,15 @@ function Tables() {
             // siparişin geri gelmesine yol açmasın.
             let lastErr = null
             for (let attempt = 0; attempt < 2; attempt++) {
-              const { error } = await supabase.from('orders').update(patch).eq('id', rid)
-              if (!error) { lastErr = null; break }
-              lastErr = error
+              try {
+                const { error } = await supabase.from('orders').update(patch).eq('id', rid)
+                  .abortSignal(AbortSignal.timeout(REMOTE_TIMEOUT_MS))
+                if (!error) { lastErr = null; break }
+                lastErr = error
+              } catch (e) {
+                // Zaman asimi AbortError firlatir — basarisiz deneme say
+                lastErr = e
+              }
             }
             if (lastErr) {
               remoteClosed = false
@@ -1033,13 +1069,9 @@ function Tables() {
         }
         if (lowStockWarnings?.length) setLowStockAlerts(lowStockWarnings)
         console.log(`[Tables] ✓ Order completed — Masa ${tableId} | ₺${transactionData.total?.toFixed(2)} | ${transactionData.paymentMethod}`)
-        // Table just closed — free it up remotely if nothing else is active there
-        if (isSupabaseReady) {
-          try {
-            const { data: rem } = await supabase.from('orders').select('id').eq('table_id', tableId).eq('status', 'active').limit(1)
-            if (!rem?.length) await supabase.from('tables').update({ status: 'empty' }).eq('id', tableId)
-          } catch (e) { console.warn('[Tables] masa durumu güncellenemedi', e) }
-        }
+        // Table just closed — free it up remotely if nothing else is active
+        // there. Arka planda: kasiyer bunu beklemez.
+        freeTableRemotely(tableId, [transactionData.supabaseOrderId, ...groups.map(g => g.supabaseOrderId)])
         if (isOnline) triggerSync()
 
         // İşlem gerçekten başarılı oldu — ödeme modalını ancak şimdi kapat.
@@ -1271,12 +1303,12 @@ function Tables() {
 
       if (lowStock.length) setLowStockAlerts(lowStock)
       console.log(`[Tables] ✓ ${transactionData.isFullPayment ? 'Order closed' : 'Partial payment'} — Masa ${tableId} | ₺${transactionData.paymentRows?.reduce((s, r) => s + Number(r.amount), 0).toFixed(2)}`)
-      // A group just closed — free the table remotely if nothing else is active there
-      if (anyClosed && isSupabaseReady) {
-        try {
-          const { data: rem } = await supabase.from('orders').select('id').eq('table_id', tableId).eq('status', 'active').limit(1)
-          if (!rem?.length) await supabase.from('tables').update({ status: 'empty' }).eq('id', tableId)
-        } catch (e) { console.warn('[Tables] masa durumu güncellenemedi', e) }
+      // A group just closed — free the table remotely if nothing else is
+      // active there. Arka planda: kasiyer bunu beklemez. Kapanan
+      // siparislerin "tamamlandi" durumu sunucuya henuz ulasmamis olabilir,
+      // o yuzden sayima katilmiyorlar.
+      if (anyClosed) {
+        freeTableRemotely(tableId, infos.filter(i => i.close).map(i => i.remoteId))
       }
       if (isOnline) triggerSync()
 

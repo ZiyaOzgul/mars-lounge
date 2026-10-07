@@ -20,6 +20,18 @@
   display: flex;
   flex-direction: column;
   gap: 14px;
+  /* Icerik sigmazsa disari tasmasin — listeler kendi icinde kaysin
+     (bkz. asagidaki min-height: 0 notu). */
+  overflow: hidden;
+}
+
+/* Baslik, adet ve "Ekle" bari ASLA kuculmez: kasiyer hangi urunu ekledigini
+   ve butonu her zaman gorebilmeli. Yer daralirsa yalnizca listeler kayar. */
+.icm-header,
+.icm-qty-section,
+.icm-footer,
+.icm-empty {
+  flex-shrink: 0;
 }
 
 .icm-header {
@@ -88,15 +100,34 @@
   margin-bottom: 6px;
 }
 
+/* FIX (7 Ekim 2026) — ORALET'e 11 varyant eklenince "Ekle" butonu
+   ekranin disina itiliyordu. Varyant listesinin kaydirmasi yoktu ve flex
+   ogeleri varsayilan min-height: auto yuzunden icerigin altina
+   kuculemiyordu: modal 80vh'de kesilse de icerik tasiyor, buton
+   1366x768 ekranda 917-962 px'e (ekranin altina) dusuyordu. Kasiyer en
+   altta yalnizca "Bu urun icin tanimli ekstra yok" kutusunu goruyordu.
+
+   Iki duzeltme:
+     1. iki sutun — 11 varyant 6 satira iniyor, cogu urunde kaydirma bile
+        gerekmiyor
+     2. min-height: 0 + overflow — daha da uzun listelerde liste kendi
+        icinde kayiyor, buton yerinde kaliyor */
 .icm-variants {
   display: flex;
   flex-direction: column;
+  min-height: 0;
+  flex: 0 1 auto;
 }
 
 .icm-variant-list {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
+  min-height: 0;
+  overflow-y: auto;
+  /* odak halkasi/kenarlik kesilmesin */
+  padding: 2px;
+  margin: -2px;
 }
 
 .icm-variant-item {
@@ -125,6 +156,14 @@
   font-size: 14px;
   font-weight: 700;
   color: var(--color-text-primary, #1a1a2e);
+  /* Iki sutunda uzun ad ("YABAN MERSINI") fiyati itmesin */
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.icm-variant-item__price {
+  flex-shrink: 0;
+  margin-left: 8px;
 }
 
 .icm-variant-item__price {
@@ -195,6 +234,9 @@
   flex-direction: column;
   gap: 6px;
   overflow-y: auto;
+  /* Ekstra listesi de ayni sekilde kuculup kayabilsin */
+  min-height: 0;
+  flex: 0 1 auto;
   margin: 0 -4px;
   padding: 0 4px;
 }

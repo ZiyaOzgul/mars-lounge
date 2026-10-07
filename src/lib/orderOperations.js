@@ -25,6 +25,12 @@ function uuid() {
   return (crypto?.randomUUID?.() ?? `pmt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`)
 }
 
+// Kasiyeri bekleten yolda ag istegi icin ust sinir. Internet "bagli ama
+// calismiyor" durumundayken (modem WAN'i dustu, Wi-Fi bagli) fetch kendi
+// basina dakikalarca asili kalabiliyor.
+const REMOTE_TIMEOUT_MS = 10_000
+const zamanAsimi = () => AbortSignal.timeout(REMOTE_TIMEOUT_MS)
+
 /**
  * Add one or more payments for an active order.
  *
@@ -32,7 +38,19 @@ function uuid() {
  *   - order_item_ids is used by the "ürün ürün öde" mode to link a payment
  *     to the specific items it covers (writes into payment_items junction).
  *
- * Returns { paid, remaining, completed }.
+ * Returns { paid, remaining, completed, remotePush }.
+ *
+ * FIX (7 Ekim 2026) — uzak gonderim artik BEKLENMIYOR. Eskiden odeme
+ * yerele yazildiktan sonra Supabase istekleri await ediliyordu; internet
+ * bagli-ama-calismaz durumdayken her istek uzun sure asili kaliyor, odeme
+ * ekrani "Isleniyor"da takiliyordu. Kasiyer bekleyemeyip uygulamayi
+ * yenileyince islem yarida kaliyordu: odeme YAZILMIS, siparis KAPANMAMIS.
+ * Masa "odendi" olarak geri geliyor ve kapatilamiyordu (6-7 Ekim gecesi,
+ * siparis #2662). Simdi yerel kayit aninda biter; uzak gonderim arka planda
+ * ve zaman asimli calisir, basarisiz olursa sync.js zaten tekrar dener.
+ * remotePush: arka plan gonderiminin bittigini bildiren Promise (asla
+ * reddedilmez) — cagiran, uzak taraf guncellendikten SONRA yapilmasi
+ * gereken isleri (masayi bosaltma gibi) buna baglayabilir.
  */
 export async function addPayments({
   orderLocalId,           // local sql.js orders.id
@@ -71,8 +89,22 @@ export async function addPayments({
   // sonsuza kadar açık bırakıyordu (Masa 4 vakası).
   const completed = isFullyPaid(paid, total)
 
-  // 3) If online and remote order exists, push payments immediately so mobile sees them live.
-  if (isSupabaseReady && orderRemoteId) {
+  // 3) If online and remote order exists, push payments immediately so mobile
+  //    sees them live — ARKA PLANDA (yukaridaki nota bakin).
+  const remotePush = (isSupabaseReady && orderRemoteId)
+    ? pushPaymentsInBackground({ orderLocalId, orderRemoteId, processedBy, localPaymentIds, completed })
+        .catch(e => console.warn('[orderOperations] arka plan gönderimi başarısız — sync.js tekrar deneyecek', e))
+    : Promise.resolve()
+
+  await persistDb()
+  return { paid, remaining, completed, remotePush }
+}
+
+// addPayments'in uzak ayagi. Hicbir zaman throw etmez; her istek zaman
+// asimli. Basarisiz kalan ne varsa is_synced = 0 durdugu icin sync.js'in
+// bir sonraki turunda gider.
+async function pushPaymentsInBackground({ orderLocalId, orderRemoteId, processedBy, localPaymentIds, completed }) {
+  {
     try {
       for (const { id, localId, row } of localPaymentIds) {
         const { data, error } = await supabase
@@ -93,6 +125,7 @@ export async function addPayments({
           )
           .select('id')
           .single()
+          .abortSignal(zamanAsimi())
         if (!error && data) {
           await markPaymentSynced(id, data.id)
 
@@ -109,6 +142,7 @@ export async function addPayments({
               await supabase
                 .from('payment_items')
                 .upsert(junction, { onConflict: 'order_item_id', ignoreDuplicates: true })
+                .abortSignal(zamanAsimi())
             }
           }
         }
@@ -120,7 +154,7 @@ export async function addPayments({
   }
 
   // 4) If fully paid, flip order to completed in Supabase too
-  if (completed && isSupabaseReady && orderRemoteId) {
+  if (completed) {
     try {
       // Dominant method = largest sum across rows
       const byMethod = {}
@@ -138,13 +172,11 @@ export async function addPayments({
           closed_at: new Date().toISOString(),
         })
         .eq('id', orderRemoteId)
+        .abortSignal(zamanAsimi())
     } catch (e) {
       console.warn('[orderOperations] order completion push deferred', e)
     }
   }
-
-  await persistDb()
-  return { paid, remaining, completed }
 }
 
 /**

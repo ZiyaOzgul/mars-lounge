@@ -677,12 +677,13 @@ export function AppProvider({ children }) {
     const pre = isDbInitialized() ? getUnsyncedCount() : 0
     console.log(`[Sync] ▶ triggerSync başlıyor — bekleyen=${pre}, online=${navigator.onLine}`)
 
-    beginSyncTurn()
-    pruneEchoes()
-    authServerErrorRef.current = false
-    // Yazmalar RLS'e takilmadan once oturumu saglama al (yukariya bak).
-    await ensureSession()
-
+    // KILIT ILK ISTE KAPANIR. FIX (7 Ekim 2026): kilit eskiden asagidaki
+    // await ensureSession()'dan SONRA kapaniyordu. ensureSession aga
+    // cikabiliyor (token yenileme, sessiz yeniden giris); o beklerken gelen
+    // ikinci bir istek kilidi acik bulup AYNI ANDA ikinci bir tur
+    // baslatiyordu. Loglarda ayni siparisin 4 ms arayla iki kez PATCH'lendigi
+    // goruldu (#2662, #2663). Iki tur ayni bekleyen kaydi birlikte isliyor,
+    // birinin cekme adimi digerinin gonderme adimina karisabiliyordu.
     isSyncingRef.current = true
     setIsSyncing(true)
     setSyncLogs([])
@@ -690,6 +691,12 @@ export function AppProvider({ children }) {
       setSyncLogs(prev => [...prev, { id: Date.now() + Math.random(), time: new Date(), type, text }])
     addLog('info', `Senkronizasyon başlatıldı (bekleyen=${pre})…`)
     try {
+      beginSyncTurn()
+      pruneEchoes()
+      authServerErrorRef.current = false
+      // Yazmalar RLS'e takilmadan once oturumu saglama al (yukariya bak).
+      await ensureSession()
+
       const pushed = await syncToSupabase(addLog)
       console.log('[Sync] push sonucu →', pushed)
       await pullFromSupabase(addLog, { catalog: full })
