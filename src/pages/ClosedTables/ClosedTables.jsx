@@ -154,6 +154,14 @@ export default function ClosedTables() {
                     <div className="ct-row__main">
                       <span className="ct-row__table">{o.tableName}</span>
                       <span className="ct-row__time">{formatTime(o.closedAt)}</span>
+                      {o.closedAtOriginal && (
+                        <span
+                          className="ct-row__date-edited"
+                          title={`Satış tarihi elle düzeltildi — asıl kapanış: ${new Date(o.closedAtOriginal).toLocaleString('tr-TR')}`}
+                        >
+                          Tarih düzeltildi
+                        </span>
+                      )}
                       {o.hasSettledPayment && (
                         <span className="ct-row__debt-warning" title="Bu siparişte tahsil edilmiş veresiye kaydı var — Düzeltme bu kaydı siler">
                           ⚠ Tahsil Edilmiş Veresiye
@@ -172,7 +180,7 @@ export default function ClosedTables() {
       </div>
 
       {reopenOrder && (
-        <ReopenModal order={reopenOrder} onClose={() => setReopenOrder(null)} />
+        <ReopenModal order={reopenOrder} onClose={() => setReopenOrder(null)} onChanged={loadOrders} />
       )}
     </div>
   )

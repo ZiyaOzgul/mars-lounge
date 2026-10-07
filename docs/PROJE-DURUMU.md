@@ -478,6 +478,29 @@ bitince ekran kapanır; sunucu arka planda, zaman aşımıyla. Bir ağ isteğini
 sonucuna gerçekten bağlıysa (hızlı yoldaki uzak kapatma gibi) mutlaka
 `abortSignal(AbortSignal.timeout(...))`.
 
+### Satış tarihi düzeltme (7 Ekim 2026, v1.8.5)
+
+Bir hata yüzünden açık kalıp ertesi gün kapatılan sipariş ertesi günün
+cirosuna düşüyor, gerçekte ödendiği günün kasası açık veriyordu. "Kapananlar"
+→ siparişe tıkla → **Satış zamanı → Tarihi Düzelt** ile gerçek ödeme zamanı
+girilebiliyor.
+
+- Bütün ciro hesapları (raporlar, günlük ciro, ödeme dağılımı, masa/personel)
+  satış gününü YALNIZCA `orders.closed_at`'ten okuyor; veresiye tahsilatları
+  ayrıca `settled_at`'ten. Tek alanı değiştirmek ciroyu her yerde tutarlı
+  taşır — bu, değişiklik öncesi tüm sorgular taranarak doğrulandı.
+- Ciro günü "Günü Bitir" kapanışlarına göre (takvim günü değil). Pencere,
+  kaydetmeden önce yeni zamanın HANGİ iş gününe düşeceğini gösteriyor
+  ("₺300, 7 Ekim cirosundan çıkıp 6 Ekim cirosuna yazılacak").
+- Asıl kapanış zamanı `orders.closed_at_original`'da (YEREL kolon) bir kez
+  saklanır; listede "Tarih düzeltildi" işareti ve asıl saat görünür. Asıl
+  zamana geri alınca işaret kalkar. Supabase'de yalnızca `closed_at` değişir
+  (şemaya dokunulmadı) — asıl zamanın izi yalnızca bu cihazda.
+- Kurallar: yalnızca tamamlanmış sipariş; ileri tarih yok; siparişin
+  açılışından önce yok.
+- Yetki: `edit_sale_date` ("Satış Tarihini Düzelt"), varsayılan kapalı,
+  yönetici her zaman geçer.
+
 ### Açık kalan mimari soru: kaynak Supabase mi olmalı
 
 Üç uygulama (masaüstü kasa, QR menü, mobil) aynı Supabase'e bağlı. Öneri,

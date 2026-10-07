@@ -26,6 +26,7 @@ export const PERMISSION_GROUPS = [
       { key: 'apply_discount', label: 'İndirim Uygula',        desc: 'Sipariş üzerine indirim ekle' },
       { key: 'cancel_order',   label: 'Sipariş İptal',         desc: 'Aktif siparişi iptal et' },
       { key: 'reopen_table',   label: 'Masa Yeniden Aç',       desc: 'Kapanan masayı geri açabilir (Düzeltme / Yeni Sipariş)' },
+      { key: 'edit_sale_date', label: 'Satış Tarihini Düzelt', desc: 'Kapanan siparişin ödendiği günü değiştirir — ciroyu başka güne taşır' },
     ],
   },
 ]
@@ -35,6 +36,8 @@ export const DEFAULT_PERMISSIONS = {
   products_view: true, products_edit: false, ingredients: true,
   reports: false, settings: false,
   close_table: true, apply_discount: false, cancel_order: false, reopen_table: false,
+  // Ciroyu gecmis bir gune tasir — varsayilan kapali, yonetici her zaman gecer.
+  edit_sale_date: false,
 }
 
 export function hasPerm(user, key) {

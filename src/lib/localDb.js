@@ -554,6 +554,11 @@ export async function initDb() {
     // gonderdigi icin (bkz. sync.js orderPayload) bu kolon disarı cikmaz;
     // QR menuyu ve raporlari etkilemez.
     `ALTER TABLE orders ADD COLUMN guest_label TEXT`,
+    // Satis tarihi elle duzeltildiyse ASIL kapanis zamani (ilk duzeltmede bir
+    // kez yazilir, sonra degismez). Para kaydinin tarihi sessizce
+    // degismesin — "Kapananlar"da "tarih duzeltildi" isareti ve asil saat
+    // bundan gosteriliyor. SADECE YEREL: Supabase semasina dokunulmadi.
+    `ALTER TABLE orders ADD COLUMN closed_at_original TEXT`,
     // Offline login fallback: PBKDF2 salt+hash per email, saved on every
     // successful online login so the same account can log in with no
     // internet on this device. Never stores the plaintext password.
@@ -3915,12 +3920,57 @@ export async function deleteOrderPaymentsCascade(orderId) {
 
 // Completed orders for the "Kapananlar" page, newest first. Items +
 // modifiers are batch-loaded the same way getOrdersList does.
+// Kapanmis bir siparisin SATIS ZAMANINI (closed_at) degistirir.
+//
+// NEDEN: bir hata yuzunden acik kalip ertesi gun kapatilan bir siparis
+// ertesi gunun cirosuna dusuyor, gercekte odendigi gunun kasasi acik
+// veriyordu. Butun ciro hesaplari (raporlar, gunluk ciro, odeme dagilimi,
+// masa/personel dokumu) satis gununu yalnizca orders.closed_at'ten okuyor
+// — bu alani degistirmek ciroyu her yerde tutarli olarak tasir. Veresiye
+// TAHSILATLARI ayrica settled_at'ten sayildigi icin onlar yerinde kalir.
+//
+// Guvenlik:
+//   * yalnizca 'completed' siparis (iptal edilmis olan ciroda yok)
+//   * gelecek zaman secilemez; siparisin acilisindan once secilemez
+//     (1 dk saat kaymasi payi)
+//   * asil kapanis closed_at_original'a BIR KEZ yazilir; tekrar duzeltmede
+//     ilk deger korunur, asil zamana geri alininca isaret kalkar
+//   * is_synced = 0 → sunucuya da gider (orders push'u closed_at'i tasiyor)
+export async function updateOrderSaleDate(orderId, newClosedAtIso) {
+  requireDb()
+  const res = db.exec(
+    'SELECT status, closed_at, created_at, closed_at_original FROM orders WHERE id = ?', [orderId])
+  if (!res.length || !res[0].values.length) throw new Error('Sipariş bulunamadı')
+  const [status, closedAt, createdAt, original] = res[0].values[0]
+  if (status !== 'completed') throw new Error('Yalnızca tamamlanmış siparişin satış tarihi değiştirilebilir')
+
+  const yeni = new Date(newClosedAtIso)
+  if (!Number.isFinite(yeni.getTime())) throw new Error('Geçersiz tarih')
+  const PAY_MS = 60_000
+  if (yeni.getTime() > Date.now() + PAY_MS) throw new Error('İleri bir tarih seçilemez')
+  if (createdAt && yeni.getTime() < new Date(createdAt).getTime() - PAY_MS) {
+    throw new Error('Sipariş açılmadan önceki bir zaman seçilemez')
+  }
+
+  const iso = yeni.toISOString()
+  const asil = original || closedAt
+  // Asil zamana geri alindiysa "duzeltildi" isareti kalkar
+  const yeniAsil = iso === asil ? null : asil
+  db.run(
+    'UPDATE orders SET closed_at = ?, closed_at_original = ?, is_synced = 0 WHERE id = ?',
+    [iso, yeniAsil, orderId])
+  await persistDb()
+  console.log(`[localDb] satış tarihi düzeltildi — sipariş ${orderId}: ${closedAt} → ${iso} (asıl: ${asil})`)
+  return { previous: closedAt, next: iso, original: asil }
+}
+
 export function getClosedOrders({ sinceIso = null, limit = 200 } = {}) {
   requireDb()
   const clause = sinceIso ? "AND date(closed_at,'localtime') >= ?" : ''
   const params = sinceIso ? [sinceIso] : []
   const res = db.exec(
-    `SELECT id, closed_at, table_id, table_name, total, payment_method, waiter_name, remote_id
+    `SELECT id, closed_at, table_id, table_name, total, payment_method, waiter_name, remote_id,
+            created_at, closed_at_original
      FROM orders
      WHERE status = 'completed' ${clause}
      ORDER BY closed_at DESC
@@ -3928,9 +3978,12 @@ export function getClosedOrders({ sinceIso = null, limit = 200 } = {}) {
     params
   )
   if (!res.length || !res[0].values.length) return []
-  const orders = res[0].values.map(([id, closedAt, tableId, tableName, total, paymentMethod, waiterName, remoteId]) => ({
+  const orders = res[0].values.map(([id, closedAt, tableId, tableName, total, paymentMethod, waiterName, remoteId,
+                                     createdAt, closedAtOriginal]) => ({
     id,
     closedAt,
+    createdAt: createdAt || null,
+    closedAtOriginal: closedAtOriginal || null,
     tableId,
     tableName,
     total,

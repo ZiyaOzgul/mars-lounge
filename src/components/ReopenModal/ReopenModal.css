@@ -89,6 +89,14 @@
   gap: 16px;
 }
 
+/* Govde dolunca bolumler EZILMESIN, govde kaysin. .reo-items kose kirpmasi
+   icin overflow: hidden tasiyor; bu onu flex duzeninde kuculebilir yapiyordu
+   ve icerik tasinca urun listesi 2 px'e cokuyordu (satis zamani duzenleyicisi
+   acilinca ortaya cikti). */
+.reo-body > * {
+  flex-shrink: 0;
+}
+
 .reo-body::-webkit-scrollbar {
   width: 4px;
 }
@@ -499,4 +507,133 @@
   background: var(--color-danger);
   border-color: var(--color-danger);
   opacity: 0.88;
+}
+
+/* ── Satış zamanı (ciro günü) ── */
+.reo-saledate {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  background: var(--color-bg-page);
+}
+
+.reo-saledate__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.reo-saledate__info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.reo-saledate__label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--color-text-secondary);
+}
+
+.reo-saledate__value {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.reo-saledate__day {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.reo-saledate__edited {
+  margin-top: 4px;
+  align-self: flex-start;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--color-warning-light);
+  color: var(--color-text-primary);
+}
+
+.reo-saledate__btn {
+  flex-shrink: 0;
+  padding: 7px 14px;
+  font-size: 12px;
+  font-weight: 700;
+  font-family: inherit;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--color-accent);
+  background: var(--color-bg-card);
+  color: var(--color-accent);
+  cursor: pointer;
+}
+
+.reo-saledate__btn:hover {
+  background: var(--color-accent-light);
+}
+
+.reo-saledate__editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-border);
+}
+
+.reo-saledate__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.reo-saledate__field input {
+  padding: 8px 10px;
+  font-size: 14px;
+  font-family: inherit;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-input);
+  background: var(--color-bg-card);
+  color: var(--color-text-primary);
+}
+
+.reo-saledate__field input:focus {
+  outline: none;
+  border-color: var(--color-accent);
+}
+
+.reo-saledate__hint {
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+.reo-saledate__preview {
+  font-size: 13px;
+  line-height: 1.45;
+  padding: 8px 10px;
+  border-radius: var(--radius-input);
+  background: var(--color-accent-light);
+  color: var(--color-text-primary);
+}
+
+.reo-saledate__preview--same {
+  background: var(--color-bg-card);
+  color: var(--color-text-secondary);
+}
+
+.reo-saledate__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }

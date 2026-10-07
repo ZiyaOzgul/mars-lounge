@@ -3,7 +3,8 @@ import { useNavigate } from 'react-router-dom'
 import { useApp } from '../../context/AppContext.jsx'
 import TablePickerModal from '../TablePickerModal/TablePickerModal.jsx'
 import { hasPerm } from '../../lib/permissions.js'
-import { getSettledPaymentsForOrder } from '../../lib/localDb.js'
+import { getSettledPaymentsForOrder, getDayClosures, updateOrderSaleDate } from '../../lib/localDb.js'
+import { businessDayOf } from '../../lib/businessDay.js'
 import './ReopenModal.css'
 
 const MODES = [
@@ -39,6 +40,29 @@ function fmtDateTime(iso) {
   })
 }
 
+// ISO → <input type="datetime-local"> degeri (YEREL saat)
+function toLocalInput(iso) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  const p = n => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+// datetime-local degeri → ISO. Saat dilimi belirtilmemis tarih-saat yerel
+// saat olarak yorumlanir (ECMAScript kurali).
+function fromLocalInput(v) {
+  if (!v) return null
+  const d = new Date(v)
+  return Number.isFinite(d.getTime()) ? d.toISOString() : null
+}
+
+// 'YYYY-MM-DD' (is gunu etiketi) → "6 Ekim Pazartesi"
+function fmtBusinessDay(dateStr) {
+  if (!dateStr) return '—'
+  const [y, m, d] = dateStr.split('-').map(Number)
+  return new Date(y, m - 1, d).toLocaleDateString('tr-TR', { day: 'numeric', month: 'long', weekday: 'long' })
+}
+
 const PAYMENT_METHOD_LABELS = {
   cash: 'Nakit',
   card: 'Kart',
@@ -52,9 +76,45 @@ function paymentMethodLabel(method) {
   return PAYMENT_METHOD_LABELS[method] ?? (method || '—')
 }
 
-function ReopenModal({ order, onClose }) {
-  const { reopenClosedOrder, tableDefs, runtimeStates, currentUser } = useApp()
+function ReopenModal({ order, onClose, onChanged }) {
+  const { reopenClosedOrder, tableDefs, runtimeStates, currentUser, triggerSync } = useApp()
   const canReopen = hasPerm(currentUser, 'reopen_table')
+  const canEditDate = hasPerm(currentUser, 'edit_sale_date')
+
+  // ── Satis tarihi duzeltme ────────────────────────────────────────
+  // Bir hata yuzunden acik kalip ertesi gun kapatilan siparis ertesi gunun
+  // cirosuna dusuyor, gercekte odendigi gunun kasasi acik veriyordu. Ciro
+  // gun siniri "Gunu Bitir" kapanislarina gore hesaplandigi icin (takvim
+  // gunu degil) yeni zamanin HANGI IS GUNUNE dustugunu kaydetmeden once
+  // gosteriyoruz — gece yarisindan sonraki bir saat onceki gune ait olabilir.
+  const closures = useMemo(() => {
+    try { return getDayClosures() } catch { return [] }
+  }, [])
+  const [dateEditing, setDateEditing] = useState(false)
+  const [dateValue, setDateValue] = useState(() => toLocalInput(order.closedAt))
+  const [dateSaving, setDateSaving] = useState(false)
+  const [dateError, setDateError] = useState(null)
+  const currentDay = businessDayOf(order.closedAt, closures)
+  const newIso = fromLocalInput(dateValue)
+  const newDay = newIso ? businessDayOf(newIso, closures) : null
+  const dateChanged = !!newIso && toLocalInput(newIso) !== toLocalInput(order.closedAt)
+
+  const saveSaleDate = async () => {
+    if (!newIso || !dateChanged || dateSaving) return
+    setDateSaving(true)
+    setDateError(null)
+    try {
+      await updateOrderSaleDate(order.id, newIso)
+      // Sunucuya da gitsin; cevrimdisiysa sync kuyrugu sonra gonderir
+      try { triggerSync?.() } catch { /* yerel kayit zaten tamam */ }
+      onChanged?.()
+      onClose()
+    } catch (e) {
+      console.error('[ReopenModal] satış tarihi değiştirilemedi', e)
+      setDateError(e?.message ?? 'Tarih değiştirilemedi')
+      setDateSaving(false)
+    }
+  }
   const navigate = useNavigate()
 
   const [selectedIds, setSelectedIds] = useState(() => new Set(order.items.map(i => i.id)))
@@ -159,6 +219,75 @@ function ReopenModal({ order, onClose }) {
         </div>
 
         <div className="reo-body">
+          {/* Satis zamani — hangi gunun cirosuna yazildigi */}
+          <div className="reo-saledate">
+            <div className="reo-saledate__row">
+              <div className="reo-saledate__info">
+                <span className="reo-saledate__label">Satış zamanı</span>
+                <span className="reo-saledate__value">{fmtDateTime(order.closedAt)}</span>
+                <span className="reo-saledate__day">Ciro günü: {fmtBusinessDay(currentDay)}</span>
+                {order.closedAtOriginal && (
+                  <span className="reo-saledate__edited" title="Bu siparişin satış tarihi elle değiştirildi">
+                    Tarih düzeltildi — asıl: {fmtDateTime(order.closedAtOriginal)}
+                  </span>
+                )}
+              </div>
+              {canEditDate && !dateEditing && (
+                <button type="button" className="reo-saledate__btn" onClick={() => setDateEditing(true)}>
+                  Tarihi Düzelt
+                </button>
+              )}
+            </div>
+
+            {dateEditing && (
+              <div className="reo-saledate__editor">
+                <label className="reo-saledate__field">
+                  <span>Gerçek ödeme zamanı</span>
+                  <input
+                    type="datetime-local"
+                    value={dateValue}
+                    min={toLocalInput(order.createdAt)}
+                    max={toLocalInput(new Date().toISOString())}
+                    onChange={e => { setDateValue(e.target.value); setDateError(null) }}
+                  />
+                </label>
+                {order.createdAt && (
+                  <span className="reo-saledate__hint">Masa açılışı: {fmtDateTime(order.createdAt)}</span>
+                )}
+                {dateChanged && newDay && (
+                  newDay !== currentDay ? (
+                    <div className="reo-saledate__preview">
+                      <strong>{fmt(order.total)}</strong>, {fmtBusinessDay(currentDay)} cirosundan çıkıp{' '}
+                      <strong>{fmtBusinessDay(newDay)}</strong> cirosuna yazılacak.
+                    </div>
+                  ) : (
+                    <div className="reo-saledate__preview reo-saledate__preview--same">
+                      Saat değişiyor ama ciro günü aynı kalıyor: {fmtBusinessDay(newDay)}.
+                    </div>
+                  )
+                )}
+                {dateError && <div className="reo-error">{dateError}</div>}
+                <div className="reo-saledate__actions">
+                  <button
+                    type="button"
+                    className="reo-btn reo-btn--cancel"
+                    onClick={() => { setDateEditing(false); setDateValue(toLocalInput(order.closedAt)); setDateError(null) }}
+                  >
+                    Vazgeç
+                  </button>
+                  <button
+                    type="button"
+                    className={`reo-btn reo-btn--confirm${(!dateChanged || dateSaving) ? ' reo-btn--disabled' : ''}`}
+                    disabled={!dateChanged || dateSaving}
+                    onClick={saveSaleDate}
+                  >
+                    {dateSaving ? 'Kaydediliyor…' : 'Tarihi Kaydet'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* Items */}
           <div className="reo-items">
             {order.items.map(item => {
