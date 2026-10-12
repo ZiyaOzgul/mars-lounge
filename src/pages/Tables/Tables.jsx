@@ -1000,7 +1000,12 @@ function Tables() {
       })
       if (!scopeGroupLocalId) setSelectedTableId(null)
       try {
-        const { lowStockWarnings } = await saveCompletedOrder(transactionData)
+        // processedBy: yavas yoldaki addPayments ile ayni kural — ad degil
+        // personel UUID'si (bkz. asagidaki not, 22P02).
+        const { lowStockWarnings } = await saveCompletedOrder({
+          ...transactionData,
+          processedBy: getStaffUidByName(transactionData.waiterName),
+        })
 
         // ── Uzak satırları ÖNCE kapat ──
         // Sıra kritik: pullFromSupabase status='active' satırları geri çekiyor.

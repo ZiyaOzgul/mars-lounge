@@ -1,32 +1,21 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import { getOrdersList, getOrderItems, isDbInitialized } from '../../lib/localDb.js'
+import {
+  getOrdersList, getOrderItems, isDbInitialized, getDayClosures, getReportKpis,
+} from '../../lib/localDb.js'
+import { businessRange } from '../../lib/businessDay.js'
 import { useApp } from '../../context/AppContext.jsx'
 import './Orders.css'
 
 // ── Helpers ───────────────────────────────────────────────────────
 
+// Eskiden saatsiz tarih ('2026-10-11') donuyordu ve "Bugun" icin baslangic =
+// bitis oluyordu: sorgu closed_at >= '2026-10-11' AND closed_at < '2026-10-11'
+// hicbir satiri eslestirmiyordu, kapanan siparisler hic gorunmuyor, ciro hep
+// ₺0 cikiyordu (hafta/ay da son gunu disarida birakiyordu). Artik Raporlar
+// ile ayni "Gunu Bitir" sinirlari — iki sayfa ayni gunu ayni sekilde keser.
 function getDateRange(preset) {
-  const now = new Date()
-  const pad = n => String(n).padStart(2, '0')
-  const fmt = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`
-  const today = fmt(now)
-
-  if (preset === 'today') {
-    return { start: today, end: today }
-  }
-  if (preset === 'week') {
-    const day = now.getDay()
-    const diffToMon = day === 0 ? -6 : 1 - day
-    const mon = new Date(now); mon.setDate(now.getDate() + diffToMon)
-    const sun = new Date(mon); sun.setDate(mon.getDate() + 6)
-    return { start: fmt(mon), end: fmt(sun) }
-  }
-  if (preset === 'month') {
-    const y = now.getFullYear(), m = now.getMonth()
-    const daysInMonth = new Date(y, m + 1, 0).getDate()
-    return { start: `${y}-${pad(m+1)}-01`, end: `${y}-${pad(m+1)}-${pad(daysInMonth)}` }
-  }
-  return { start: null, end: null }
+  const [start, end] = businessRange(preset, getDayClosures(), new Date())
+  return { start, end }
 }
 
 function modifiersSum(mods) {
@@ -125,6 +114,9 @@ export default function Orders() {
   const { dbReady, isOnline, runtimeStates, setRuntimeStates, tableDefs } = useApp()
 
   const [completedOrders, setCompletedOrders] = useState([])
+  // Raporlar'daki ciro karti ile ayni sayi (veresiye satista dusulur,
+  // tahsil edildigi gun eklenir) — bkz. kpi.
+  const [rangeRevenue,    setRangeRevenue]    = useState(0)
   const [loading,         setLoading]         = useState(false)
   const [activeTab,       setActiveTab]       = useState('all')
   const [datePreset,      setDatePreset]      = useState('today')
@@ -142,6 +134,7 @@ export default function Orders() {
       const { start, end } = getDateRange(datePreset)
       const rows = getOrdersList(start, end)
       setCompletedOrders(rows)
+      setRangeRevenue(getReportKpis(start, end).revenue)
     } catch (err) {
       console.error('[Orders] load error', err)
     } finally {
@@ -208,13 +201,23 @@ export default function Orders() {
   }, [allOrders, activeTab, searchQuery])
 
   // KPI totals (only completed orders count toward revenue)
+  // Ciro Raporlar ile ayni kurala uyar: veresiye kasaya girmedigi icin
+  // satista sayilmaz. Arama yokken dogrudan Raporlar'in sayisi kullanilir
+  // (donemde tahsil edilen eski veresiyeler de dahil, o para da kasaya
+  // girdi); arama varken yalnizca listelenen siparislerin veresiye
+  // dusulmus toplami — tahsilatlar bir siparis satiri olmadigi icin aramaya
+  // uymaz.
   const kpi = useMemo(() => {
     const completedFiltered = filtered.filter(o => o.status === 'completed')
-    const total = completedFiltered.reduce((s, o) => s + (o.total || 0), 0)
+    const total = activeTab === 'active'
+      ? 0
+      : searchQuery.trim()
+        ? completedFiltered.reduce((s, o) => s + (o.total || 0) - (o.veresiye || 0), 0)
+        : rangeRevenue
     const count = filtered.length
     const avg   = completedFiltered.length > 0 ? total / completedFiltered.length : 0
     return { total, count, avg, activeCount: activeOrders.length }
-  }, [filtered, activeOrders])
+  }, [filtered, activeOrders, activeTab, searchQuery, rangeRevenue])
 
   // Open detail modal
   async function openDetail(order) {

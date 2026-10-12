@@ -501,6 +501,54 @@ girilebiliyor.
 - Yetki: `edit_sale_date` ("Satış Tarihini Düzelt"), varsayılan kapalı,
   yönetici her zaman geçer.
 
+### Gün sonu cirosu farklı, kapat-aç ile düştü (12 Ekim 2026, v1.8.6)
+
+**Şikâyet:** gün sonu sayımında sistemdeki ciro kasadan farklı; uygulama
+kapatılıp açılınca rakam düştü.
+
+**Kök neden kod değil — kasada İKİ kurulum var.** Supabase edge loglarında
+user-agent `mars-lounge-cafe/<sürüm>` taşıyor. 12 Ekim 00:22–00:24 (TR) aynı
+kafe IP'sinden uygulama dönüşümlü açılmış: 1.6.0 → 1.8.5 → 1.6.0 → 1.6.0 →
+1.8.5. Güncellenmeyen ayrı bir 1.6.0 kurulumu duruyor ve 1.8.5 ile aynı
+userData'yı (san-lucas.db + oturum) paylaşıyor. 1.6.0'ın ciro kartı
+`SUM(total)` — veresiyeyi kasaya girmiş sayıyor. O gece fark tam **₺820**
+(00:01 ₺470 + 00:04 ₺350 veresiye): 1.6.0 ₺13.135, 1.8.5 ₺12.315 (doğru).
+1.6.0 o gece yalnızca 2 dakika açıktı ve sunucuya hiçbir şey yazmadı (0
+POST/PATCH). Sunucu verisi temiz: son 14 günde her siparişin tutarı
+ödemeleriyle birebir tutuyor.
+
+**Yapılacak (müşteri PC'sinde, elle):** 1.6.0 kurulumunu kaldır. Kısayollara
+sağ tık → "Dosya konumunu aç"; Windows Uygulamalar listesinde iki Mars
+Lounge olabilir. Kaldırılana kadar risk sürüyor — eski kod yeni sürümün
+veritabanı dosyasına yazabilir.
+
+**Ciro şikâyetinde ilk bakılacak yer:** loglarda birden fazla sürüm var mı.
+
+Araştırırken bulunan ve 1.8.6'da düzeltilenler:
+
+1. **Hızlı yol ödeme satırı yazmıyordu** (`saveCompletedOrder`). Masa ilk
+   senkrondan önce tek seferde ödenince (çevrimdışı gün, ya da açılıp
+   saniyeler içinde kapanan masa) `payments` satırı yoktu. Ciro veresiye
+   payını `payments`'tan düştüğü için veresiye kasaya girmiş sayılıyor,
+   borçlunun adı kaybolduğu için **veresiye defterinde hiç görünmüyordu**.
+   Artık modalın ödeme satırları (borçlu adı, personel UUID'si) siparişle
+   aynı işlemde yazılıyor ve senkronla sunucuya gidiyor. Nakit/kart/IBAN
+   dağılımı yine siparişin kolonlarından okunuyor, değişmedi.
+   **Geçmişe dokunulmadı.** Sunucuda bu durumdaki 4 sipariş (hepsi 3 Ekim,
+   kota kilidi günü): #2538 Masa 23 ₺1.870, #2543 Masa 2 ₺2.020, #2557
+   Masa 8 ₺600 veresiye, #2534 Masa 16 ₺355 karma. Borçlu adları hiçbir
+   yerde kayıtlı değil; düzeltme kullanıcı kararını bekliyor (aşağıda).
+2. **Siparişler sayfası tarih filtresi** saatsiz tarih veriyordu; "Bugün"
+   için `closed_at >= '2026-10-11' AND closed_at < '2026-10-11'` hiçbir satır
+   döndürmüyor, ciro hep ₺0 görünüyordu. Artık Raporlar ile aynı "Günü
+   Bitir" sınırları; "Toplam Ciro" Raporlar'ın sayısıyla aynı (veresiye
+   kuralı dahil).
+3. **Tek kopya kilidi** (`electron/main.js`, `requestSingleInstanceLock`).
+   İkinci açılış hiçbir şey başlatmadan kapanıyor, açık pencere öne geliyor.
+   Denendi: Electron 29'da ikinci kopyada `app.quit()` sonrası `whenReady`
+   YİNE çalışıyor — o yüzden whenReady'nin başında ayrıca dönülüyor. Sınır:
+   kilidi yalnızca bu kodu taşıyan sürümler tanır, 1.6.0'ı durdurmaz.
+
 ### Açık kalan mimari soru: kaynak Supabase mi olmalı
 
 Üç uygulama (masaüstü kasa, QR menü, mobil) aynı Supabase'e bağlı. Öneri,
@@ -548,6 +596,12 @@ düzenlemenin kapanması kasa için davranış değişikliği.
       "kalanı sil, masayı kapat" onayı eklendi. Fark indirim olarak yazılıyor ve
       sipariş tutarı gerçekten alınan paraya çekiliyor, böylece ciro şişmiyor.
 - [ ] Düzenli otomatik yedekleme isteniyor mu?
+- [ ] **Kasadaki eski 1.6.0 kurulumu kaldırılacak** (12 Ekim 2026) — müşteri
+      PC'sinde elle; bkz. "Gün sonu cirosu farklı".
+- [ ] **3 Ekim'in defterde görünmeyen 4 veresiyesi** (#2534, #2538, #2543,
+      #2557 — ₺4.845, veresiye payı en az ₺4.490). Deftere eklenirse 3 Ekim
+      cirosu veresiye payı kadar düşer ve borç defterde görünür. Borçlu adları
+      bilinmiyor.
 
 ## Bu projede öğrenilen çalışma kuralları
 

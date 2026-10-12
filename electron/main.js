@@ -861,7 +861,36 @@ ipcMain.handle('printers:printReceipt', (_event, { printerName, html } = {}) => 
   })
 })
 
+// ── Tek kopya kilidi ───────────────────────────────────────────────
+// Iki kopya ayni anda acikken ikisi de ayni san-lucas.db'yi kendi
+// bellegine yukluyor ve diske sirayla yaziyor: ekranda gorunen sayilar
+// diskteki dosyayla tutmuyor, sonra kapanan kopya digerinin yazdiklarinin
+// ustune yaziyor. Ikinci acilis artik hicbir sey yapmadan kapanir ve acik
+// olan pencere one gelir.
+//
+// SINIR: kilidi yalnizca bu kodu tasiyan surumler taniyor. 12 Ekim 2026'da
+// kasada 1.8.5'in yaninda ayri kurulmus eski bir 1.6.0 bulundu (gun sonu
+// cirosu ₺820 farkli gorundu — 1.6.0 veresiyeyi ciroya sayiyor). O kurulum
+// bu kilide uymaz; elle kaldirilmasi gerekir.
+const gotSingleInstanceLock = app.requestSingleInstanceLock()
+if (!gotSingleInstanceLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    const win = BrowserWindow.getAllWindows()[0]
+    if (!win) return
+    if (win.isMinimized()) win.restore()
+    win.show()
+    win.focus()
+    logLine('[app] ikinci kopya acilmak istendi — acik pencere one getirildi')
+  })
+}
+
 app.whenReady().then(async () => {
+  // Ikinci kopya: hicbir sey baslatma (yedek, pencere, guncelleyici) —
+  // app.quit() zaten cagrildi.
+  if (!gotSingleInstanceLock) return
+
   protocol.handle('app-image', async (request) => {
     try {
       const u = new URL(request.url)

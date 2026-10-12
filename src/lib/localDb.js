@@ -1435,6 +1435,33 @@ export async function saveCompletedOrder(txData) {
     }
   }
 
+  // Odeme satirlari. Hizli yol (masa ilk senkrondan once tek seferde
+  // odendiginde) eskiden HIC payments satiri yazmiyordu. Ciro, siparisin
+  // veresiye payini payments'tan dusuyor (VERESIYE_PER_ORDER); satir
+  // olmayinca veresiye kasaya girmis para gibi ciroya giriyor ve borclunun
+  // adi kayboldugu icin veresiye defterinde hic gorunmuyordu (3 Ekim'de
+  // cevrimdisi gunde 4 siparis, ₺4.490 borc). Ayni satirlari yavas yolun
+  // addPayments'i de yaziyor; nakit/kart/IBAN dagilimi hala yukaridaki
+  // siparis kolonlarindan okunuyor, ona dokunulmuyor.
+  // Modal satir gondermediyse (eski cagri bicimi) tek yontemli odeme
+  // tutarin tamami olarak yazilir; 'split' satirsiz gelemez, uydurulmaz.
+  const odemeler = payRows.length
+    ? payRows
+    : (['cash', 'card', 'iban', 'veresiye', 'points'].includes(txData.paymentMethod)
+        ? [{ amount: txData.total, payment_method: txData.paymentMethod, payer_label: null }]
+        : [])
+  for (const r of odemeler) {
+    const amount = Math.round(Number(r.amount || 0) * 100) / 100
+    if (!(amount > 0) || !r.payment_method) continue
+    db.run(
+      `INSERT INTO payments
+         (id, local_id, order_id, amount, payment_method, payer_label, processed_by, device, is_synced, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'desktop', 0, ?)`,
+      [newLocalId(), crypto.randomUUID(), orderId, amount, r.payment_method,
+       r.payer_label || null, txData.processedBy || null, closedAt]
+    )
+  }
+
   const lowStockWarnings = consumeIngredients(txData.items ?? [])
   await persistDb()
   return { lowStockWarnings }
@@ -2819,7 +2846,9 @@ export function getOrdersList(startIso, endIso) {
   const { clause, params } = _dateClause(startIso, endIso)
   const res = db.exec(
     `SELECT o.id, o.closed_at, o.table_name, o.payment_method, o.total, o.waiter_name,
-            GROUP_CONCAT(oi.name || ' ×' || oi.quantity, ', ') as items_summary
+            GROUP_CONCAT(oi.name || ' ×' || oi.quantity, ', ') as items_summary,
+            (SELECT COALESCE(SUM(p.amount),0) FROM payments p
+              WHERE p.order_id = o.id AND p.payment_method = 'veresiye') as veresiye
      FROM orders o
      LEFT JOIN order_items oi ON oi.order_id = o.id
      WHERE o.status = 'completed' ${clause}
@@ -2828,10 +2857,13 @@ export function getOrdersList(startIso, endIso) {
     params
   )
   if (!res.length || !res[0].values.length) return []
-  const orders = res[0].values.map(([id, closedAt, tableName, paymentMethod, total, waiterName, itemsSummary]) => ({
+  // veresiye: siparisin veresiye payi — ciro hesaplayan cagiranlar dusmek icin
+  // kullanir (bkz. VERESIYE_PER_ORDER, Orders sayfasi KPI'si).
+  const orders = res[0].values.map(([id, closedAt, tableName, paymentMethod, total, waiterName, itemsSummary, veresiye]) => ({
     id, closedAt, tableName, paymentMethod, total,
     waiterName: waiterName || null,
     itemsSummary: itemsSummary || '',
+    veresiye: Number(veresiye) || 0,
     items: [],
   }))
 
