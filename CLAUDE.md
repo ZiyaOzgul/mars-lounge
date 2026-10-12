@@ -367,9 +367,9 @@ VITE_SUPABASE_ANON_KEY=your_supabase_anon_key
 
 ## Orchestration Workflow
 
-Use Fable 5 as the lead engineer and orchestrator.
+Use Opus 5.5 as the lead engineer and orchestrator.
 
-Fable 5 should:
+Opus 5.5 should:
 
 * understand the goal
 * create the plan
@@ -379,9 +379,9 @@ Fable 5 should:
 * review outputs from delegated work
 * make the final quality decision
 
-Fable 5 should not do mechanical work unless it is necessary.
+Opus 5.5 should not do mechanical work unless it is necessary.
 
-Avoid using Fable 5 for:
+Avoid using Opus 5.5 for:
 
 * broad file scanning
 * repetitive file edits
@@ -393,19 +393,19 @@ Avoid using Fable 5 for:
 
 ### Routing rules
 
-**Scope: these routing rules apply ONLY to the top-level orchestrator (Fable 5 in the main session).** Subagents (deep-reasoner, fast-worker, implementer) must execute their assigned brief directly themselves — they must NEVER re-route, spawn other agents, or delegate further. If a subagent believes its task is out of scope, it reports back instead of delegating.
+**Scope: these routing rules apply ONLY to the top-level orchestrator (Opus 5.5 in the main session).** Subagents (deep-reasoner, fast-worker, implementer) must execute their assigned brief directly themselves — they must NEVER re-route, spawn other agents, or delegate further. If a subagent believes its task is out of scope, it reports back instead of delegating.
 
 Subagent definitions live in `.claude/agents/` and are invoked via the Agent tool with the matching `subagent_type`:
 
 | Route | Model | subagent_type |
 |---|---|---|
-| deep-reasoner | Opus 4.8 | `deep-reasoner` |
-| fast-worker | Haiku 4.5 | `fast-worker` |
-| implementer | Sonnet 5 | `implementer` |
+| deep-reasoner | Opus 5.5 | `deep-reasoner` |
+| fast-worker | Haiku 5.5 | `fast-worker` |
+| implementer | Sonnet 5.5 | `implementer` |
 
 Before doing any task, first choose one of these routes:
 
-* Fable direct
+* Opus direct
 * deep-reasoner
 * fast-worker
 * implementer
@@ -413,7 +413,7 @@ Before doing any task, first choose one of these routes:
 
 Always explain the routing choice in one sentence.
 
-Use Fable direct for:
+Use Opus direct for:
 
 * planning
 * task decomposition
@@ -422,7 +422,7 @@ Use Fable direct for:
 * product or architecture direction
 * deciding whether to accept, revise, or escalate
 
-Use deep-reasoner (Opus 4.8) for:
+Use deep-reasoner (Opus 5.5) for:
 
 * architecture decisions
 * complex debugging
@@ -431,7 +431,7 @@ Use deep-reasoner (Opus 4.8) for:
 * risky refactors
 * second-opinion analysis before important changes
 
-Use fast-worker (Haiku 4.5) for:
+Use fast-worker (Haiku 5.5) for:
 
 * boilerplate
 * tests
@@ -441,7 +441,7 @@ Use fast-worker (Haiku 4.5) for:
 * repetitive mechanical changes
 * small documentation updates
 
-Use implementer (Sonnet 5) for:
+Use implementer (Sonnet 5.5) for:
 
 * well-specified implementation tasks
 * codebase investigation
@@ -454,11 +454,11 @@ If a task clearly matches a subagent role, prefer delegation instead of doing th
 
 If you do not delegate, briefly explain why.
 
-Return all important results to Fable 5 before final acceptance.
+Return all important results to Opus 5.5 before final acceptance.
 
 ### Implementer execution rule
 
-When the selected route is implementer, do not continue the implementation yourself as Fable 5.
+When the selected route is implementer, do not continue the implementation yourself as Opus 5.5.
 
 Instead:
 
@@ -466,7 +466,7 @@ Instead:
 2. Include the task, files or area, constraints, acceptance criteria, and verification command.
 3. Delegate via the Agent tool with `subagent_type: "implementer"`, passing the complete brief as the prompt — the subagent has no conversation context.
 4. Wait for the implementer to return the result.
-5. Review the implementer result as Fable 5 before accepting it.
+5. Review the implementer result as Opus 5.5 before accepting it.
 
 Long runs: launch the agent in the background and collect the output when it finishes.
 
