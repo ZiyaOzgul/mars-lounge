@@ -549,6 +549,63 @@ Araştırırken bulunan ve 1.8.6'da düzeltilenler:
    YİNE çalışıyor — o yüzden whenReady'nin başında ayrıca dönülüyor. Sınır:
    kilidi yalnızca bu kodu taşıyan sürümler tanır, 1.6.0'ı durdurmaz.
 
+### Menü resimleri 800 px'e küçültüldü (22 Kasım 2026)
+
+Amaç: ücretsiz plana dönüş. Kasım ölçümü: resim trafiği günde 103–183 MB
+(~4,4 GB/ay, ücretsiz önbellekli kota 5 GB). Trafiğin TAMAMI Netlify
+ImageCDN'den (QR menü `next/image`); telefonlar Supabase'e hiç gelmiyor.
+Netlify her dosyayı günde ~14–18 kez yeniden çekiyor — 1 yıllık
+Cache-Control bunu engellemiyor, o yüzden tek kaldıraç asıl dosya boyutu.
+
+- 78 kullanılan resim (69 ürün, 9 kategori): 15,5 MB → 8,1 MB (%47).
+  Genişlik en fazla 800 px (ürün detayı 2x ekranda ~828 ister) ve şu anki
+  genişliği asla geçmiyor (kategoriler 600 px kaldı). WebP q82, PSNR ort.
+  36,6 / en düşük 33,3 dB. 67'si asıl PNG/JPEG'den kodlandı.
+- Yeni adlar `<numara>-w800.webp`; eski dosyalar silinmedi. 78/78 kayıt
+  doğru dosyaya eşleşiyor (yükleme öncesi/sonrası kayıt kayıt doğrulandı).
+- Yedek + betikler + geri alma: `D:\code\Mars Lounge\yedek\storage-2026-11-22\`
+  (`orijinal/` 152 dosya 70,4 MB, `adresler.json`, `geri-al.sql` 78 satır).
+- Windows uygulamasına dokunulmadı. DİKKAT: kasanın ürün yükleme profili
+  hâlâ 1200 px (`src/lib/imageCompress.js`); kasadan yeni ürün resmi
+  yüklenirse büyük gelir. Kullanıcı yeni resim eklenmeyeceğini söyledi.
+- Depoda kullanılmayan ~150 dosya duruyor (eski PNG/JPEG/WebP); trafiğe
+  yansımıyor, 1 GB sınırının çok altında.
+
+### Masa kapanmıyor "kısmen kaydedilmiş olabilir", sahte oturum uyarısı, web notları (27 Kasım 2026, v1.8.7)
+
+**Masa kapanmıyor.** Kasiyer: "parçalı ödendi diyor, kapanmıyor; ödeme
+alınmamıştı, tutar aynı". Kök neden: "Ürün Taşı" ürünü ESKİ runtime
+kimliğiyle taşıyordu; o kimlik kaynak siparişin `order_items.local_id`'si
+(UNIQUE). Hedef masa zaten kalıcıysa ve numarası kaynaktan KÜÇÜKSE
+`materializeOpenTables` önce onu işliyor → INSERT `UNIQUE constraint failed:
+order_items.local_id` → tüm tur duruyor. Tahsil Et de aynı yerden patlıyor
+(`ensurePersistedActiveOrder`, ödeme satırından ÖNCE) → para yazılmıyor ama
+mesaj "kısmen kaydedilmiş olabilir" diyordu. Gerçek localDb.js ile Node'da
+tekrarlandı. Düzeltme:
+- `Tables.jsx handleMoveItemsToTable`: taşınan ürüne yeni uuid (hedef numarası
+  büyük olduğunda zaten olan davranış).
+- `AppContext.materializeOpenTables`: grup başına try/catch — tek bozuk grup
+  diğer masaların diske yazılmasını durduramaz.
+- Ödeme satırı yazılmadan patlarsa mesaj artık "Ödeme KAYDEDİLMEDİ — masa açık"
+  ve hata metnini gösterir.
+- AÇIK: renderer console'u kasa PC'de dosyaya yazılmıyor (`main.js` yalnız
+  main process). Bu yüzden hata sahada kanıtlanamadı; mekanizma koddan +
+  testten. Aynı belirti sürerse ilk iş renderer hatalarını `logLine`'a
+  yönlendirmek.
+
+**Sahte "OTURUM SORUNU".** Giriş ekranındayken realtime/periyodik senkron
+çalışıp oturumsuz `ensureSession` uyarıyı kuruyordu; başarılı giriş onu
+silmiyordu. Artık giriş yokken `triggerSync` atlanıyor (ref render'da
+atanıyor — AppShell'in ilk senkronu üstten önce çalışır), SIGNED_IN uyarıyı
+siliyor. Kasa çıkışı ve "beni hatırla=0" açılışı `signOut({ scope: 'local' })`
+— varsayılan global, aynı hesabın TÜM cihazlarını atıyordu (22 Kasım'da
+yükleme betiği kasayı bu yüzden attı).
+
+**Web notları kasaya gelmiyordu.** Kasa sorunu değil: `mars-lounge-web/lib/
+supabase/actions.ts` `notes`'u `order_items`'a hiç yazmıyordu (30 günde
+sunucuda sıfır not). `note: item.notes?.trim() || null` eklendi. Kasa
+`order_items.note`'u zaten çekip QR onayı/masa/ödeme ekranında gösteriyor.
+
 ### Açık kalan mimari soru: kaynak Supabase mi olmalı
 
 Üç uygulama (masaüstü kasa, QR menü, mobil) aynı Supabase'e bağlı. Öneri,

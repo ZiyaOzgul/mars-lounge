@@ -246,14 +246,25 @@ export function AppProvider({ children }) {
   const runtimeStatesRef  = useRef(runtimeStates)
   useEffect(() => { runtimeStatesRef.current = runtimeStates }, [runtimeStates])
   const loginUser  = useCallback((u) => setCurrentUser(u), [])
+  // triggerSync girisli kullanici olmadan calismamali (bkz. orada). State
+  // yerine ref: triggerSync'in bagimliliklarini degistirmeden guncel degeri okur.
+  // Render sirasinda atanir, efektte DEGIL: AppShell (alt bilesen) giristen
+  // sonraki ilk senkronu kendi efektinde baslatiyor ve React alt bilesenin
+  // efektini ustunkinden ONCE calistirir — efektte guncellenseydi o tur
+  // ref'i hala bos gorup atlanirdi.
+  const currentUserRef = useRef(currentUser)
+  currentUserRef.current = currentUser
   // Kasiyer "Çıkış yap"a bastığında true. Supabase'in SIGNED_OUT olayı hem
   // bilinçli çıkışta hem de oturum yenilemesi başarısız olduğunda geliyor;
   // ikisini ayırmanın tek yolu bu bayrak (bkz. onAuthStateChange).
   const userLogoutRef = useRef(false)
   const logoutUser = useCallback(async () => {
     userLogoutRef.current = true
+    // scope 'local': YALNIZCA bu kasanin oturumu kapanir. Varsayilan
+    // ('global') ayni personel hesabiyla acik TUM cihazlarin oturumunu
+    // sunucuda iptal ediyordu (22 Kasim 2026, kasa bu yuzden atildi).
     if (isSupabaseReady) {
-      try { await supabase.auth.signOut() } catch (e) { console.error('[Auth] signOut failed', e) }
+      try { await supabase.auth.signOut({ scope: 'local' }) } catch (e) { console.error('[Auth] signOut failed', e) }
     }
     localStorage.removeItem(CACHED_USER_KEY)
     clearLastPassword()
@@ -269,7 +280,7 @@ export function AppProvider({ children }) {
       // persisted Supabase session; drop it and send the user to Login.
       // Missing key (existing installs) defaults to remember=true.
       if (localStorage.getItem('san-lucas-remember-me') === '0') {
-        try { await supabase.auth.signOut() } catch (e) { console.warn('[Auth] remember-me=0 signOut failed', e) }
+        try { await supabase.auth.signOut({ scope: 'local' }) } catch (e) { console.warn('[Auth] remember-me=0 signOut failed', e) }
         localStorage.removeItem(CACHED_USER_KEY)
         if (mounted) setAuthReady(true)
         return
@@ -321,6 +332,14 @@ export function AppProvider({ children }) {
         userLogoutRef.current = false
         setCurrentUser(null)
         return
+      }
+      // Gercek bir oturum kuruldu: onceden kalmis "OTURUM SORUNU" uyarisi
+      // artik gecersiz. Eskiden yalnizca bir yazma basariyla gidince
+      // kalkiyordu; gonderilecek kayit yoksa basarili giristen sonra da
+      // ekranda kaliyordu.
+      if (event === 'SIGNED_IN' && session?.access_token) {
+        noteWriteAccepted()
+        setAuthFailure(null)
       }
       // SIGNED_IN / TOKEN_REFRESHED — refresh user profile
       const u = await fetchProfileForUser(session.user)
@@ -673,6 +692,15 @@ export function AppProvider({ children }) {
       console.warn('[Sync] ⚠ triggerSync atlandı — Supabase yapılandırılmamış')
       return
     }
+    // Giris ekranindayken (QR/realtime olayi ya da periyodik tur) senkron
+    // CALISMAZ: oturum olmadan ensureSession basarisiz olup "OTURUM SORUNU"
+    // uyarisini hazirliyor, kasiyer dogru giris yapsa bile uyarı ekranda
+    // kaliyordu. Bekleyen kayitlar yerelde durur, giristen hemen sonraki
+    // acilis senkronu (App.jsx) onlari gonderir.
+    if (!currentUserRef.current) {
+      console.log('[Sync] giriş yapılmamış — tur atlandı')
+      return
+    }
     const t0 = performance.now()
     const pre = isDbInitialized() ? getUnsyncedCount() : 0
     console.log(`[Sync] ▶ triggerSync başlıyor — bekleyen=${pre}, online=${navigator.onLine}`)
@@ -956,16 +984,23 @@ export function AppProvider({ children }) {
           const gSub = groupSubtotal(g.items)
           const gDiscount = allSub > 0 ? discount * (gSub / allSub) : 0
           const gTotal = Math.round((gSub - gDiscount) * 100) / 100
-          await ensurePersistedActiveOrder({
-            tableId,
-            tableName: tableDefs.find(td => td.id === tableId)?.name ?? '',
-            waiterName: state.waiter && state.waiter !== '—' ? state.waiter : null,
-            groupLocalId: g.localId,
-            supabaseOrderId: g.supabaseOrderId ?? null,
-            items: g.items,
-            total: gTotal,
-            guestLabel: g.guestLabel ?? null,
-          })
+          // Grup basina ayri try: tek bir sorunlu grup eskiden TUM turu
+          // durduruyordu — ondan sonra gelen masalar diske yazilmiyor,
+          // asagidaki temizlik dongusu hic calismiyordu.
+          try {
+            await ensurePersistedActiveOrder({
+              tableId,
+              tableName: tableDefs.find(td => td.id === tableId)?.name ?? '',
+              waiterName: state.waiter && state.waiter !== '—' ? state.waiter : null,
+              groupLocalId: g.localId,
+              supabaseOrderId: g.supabaseOrderId ?? null,
+              items: g.items,
+              total: gTotal,
+              guestLabel: g.guestLabel ?? null,
+            })
+          } catch (e) {
+            console.warn(`[AppContext] masa ${tableId} grup ${g.localId} kalıcılaştırılamadı`, e)
+          }
         }
       }
       for (const o of getAllActiveOrders()) {

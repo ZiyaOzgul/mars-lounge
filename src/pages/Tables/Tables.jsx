@@ -705,7 +705,18 @@ function Tables() {
       const fromIdx = fromOrders.findIndex(o => o.localId === subOrderLocalId)
       if (fromIdx === -1) return prev
       const fromGroup = fromOrders[fromIdx]
-      const movingItems = fromGroup.items.filter(i => idSet.has(i.id))
+      // Tasinan her urune YENI kimlik verilir. Eskiden ayni kimlikle
+      // gidiyordu; o kimlik kaynak siparisin yerel order_items.local_id'si
+      // oldugu icin (UNIQUE) hedef masa kalicilastirilirken INSERT patliyordu.
+      // Hedef masa numarasi kaynaktan kucukse once o isleniyor, hata her
+      // turda tekrarlaniyor ve masa "Odeme islenirken hata olustu" ile
+      // kapanamiyordu (27 Kasim 2026). Yeni kimlikle kaynak eski satiri silip
+      // mezar tasi birakiyor, hedef yeni satir ekliyor — hedef numarasi buyuk
+      // oldugunda zaten olan davranisin aynisi. Eski kimlikler
+      // recentlyRemovedRef'e otomatik dustugu icin senkron onlari geri getirmez.
+      const movingItems = fromGroup.items
+        .filter(i => idSet.has(i.id))
+        .map(i => ({ ...i, id: crypto.randomUUID() }))
       const remainingFromItems = fromGroup.items.filter(i => !idSet.has(i.id))
 
       const newFromOrders = remainingFromItems.length === 0
@@ -1095,6 +1106,10 @@ function Tables() {
     // ── Materialized path (partial payment, or closing an order that already
     //    has partial payments) ──
     if (groups.length === 0) { setPaymentTable(null); setPaymentOrder(null); return }
+    // Hata mesaji icin: ilk odeme satiri yazilmadan once patladiysa para
+    // KAYDEDILMEMISTIR. Eskiden her durumda "tutar kismen kaydedilmis olabilir"
+    // deniyordu; kasiyer bunu "parcali odendi" diye okuyordu.
+    let paymentsWritten = false
     try {
       const discount = transactionData.discount ?? 0
 
@@ -1221,6 +1236,7 @@ function Tables() {
         info.completed = false
         info.paidNow = getOrderTotalPaid(info.orderId)
         if (mappedRows.length) {
+          paymentsWritten = true
           const payRes = await addPayments({
             orderLocalId: info.orderId,
             orderRemoteId: info.remoteId ? Number(info.remoteId) : null,
@@ -1324,7 +1340,9 @@ function Tables() {
       console.error('[Tables] Failed to record payment', e)
       setPaymentError({
         tableId,
-        message: 'Ödeme işlenirken hata oluştu. Tutar kısmen kaydedilmiş olabilir — tekrar tahsil etmeden önce masayı ve Siparişler sayfasını kontrol edin, aynı tutarı iki kez almayın.',
+        message: paymentsWritten
+          ? 'Ödeme işlenirken hata oluştu. Tutar kısmen kaydedilmiş olabilir — tekrar tahsil etmeden önce masayı ve Siparişler sayfasını kontrol edin, aynı tutarı iki kez almayın.'
+          : `Ödeme KAYDEDİLMEDİ — masa açık, tutar değişmedi, tekrar deneyebilirsiniz. Sorun sürerse bu mesajı bildirin. (${e?.message ?? e})`,
       })
     }
   }
